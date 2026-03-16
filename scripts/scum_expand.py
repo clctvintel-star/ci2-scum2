@@ -1,10 +1,13 @@
+import json
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
+from anthropic import Anthropic
 
-from utils import load_configs, ensure_dir
+from utils import load_configs, load_env, ensure_dir, load_prompt
 
 
 def build_alias_patterns(firms_config):
@@ -56,7 +59,19 @@ def assemble_event_text(row):
     return "\n\n".join(parts).strip()
 
 
-def find_matches(text, alias_patterns):
+def build_thread_text(group):
+    texts = []
+    group = group.sort_values(["created_utc", "depth"], ascending=[True, True])
+
+    for _, row in group.iterrows():
+        txt = row["event_text"]
+        if isinstance(txt, str) and txt.strip():
+            texts.append(txt)
+
+    return "\n\n".join(texts).strip()
+
+
+def regex_matches(text, alias_patterns):
     matched = []
 
     if not isinstance(text, str) or not text.strip():
@@ -78,22 +93,91 @@ def find_matches(text, alias_patterns):
     return matched
 
 
-def build_thread_text(group):
-    texts = []
-    group = group.sort_values(["created_utc", "depth"], ascending=[True, True])
+def safe_json_load(text):
+    text = text.strip()
 
-    for _, row in group.iterrows():
-        txt = row["event_text"]
-        if isinstance(txt, str) and txt.strip():
-            texts.append(txt)
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
 
-    return "\n\n".join(texts).strip()
+    match = re.search(r"(\[[\s\S]*\])", text)
+    if match:
+        try:
+            return json.loads(match.group(1))
+        except Exception:
+            return []
+
+    return []
 
 
-def build_thread_firm_pairs(events_df, alias_patterns):
+def call_thread_detector(client, model_name, prompt, retry_limit=3, sleep_seconds=1):
+    for _ in range(retry_limit):
+        try:
+            resp = client.messages.create(
+                model=model_name,
+                max_tokens=1200,
+                temperature=0,
+                system="Return JSON only.",
+                messages=[{"role": "user", "content": prompt}],
+            )
+            text = resp.content[0].text.strip()
+            return safe_json_load(text)
+        except Exception as e:
+            print(f"LLM thread detector error, retrying: {e}")
+            time.sleep(sleep_seconds)
+
+    return []
+
+
+def build_detector_prompt(prompt_template, canonical_names, thread_title, thread_text, regex_candidates):
+    return prompt_template.format(
+        FIRM_UNIVERSE=json.dumps(canonical_names, ensure_ascii=False),
+        REGEX_CANDIDATES=json.dumps(regex_candidates, ensure_ascii=False),
+        THREAD_TITLE=thread_title or "",
+        THREAD_TEXT=thread_text or "",
+    )
+
+
+def normalize_llm_candidates(llm_output, allowed_names):
     rows = []
 
+    if not isinstance(llm_output, list):
+        return rows
+
+    allowed_set = set(allowed_names)
+
+    for item in llm_output:
+        if not isinstance(item, dict):
+            continue
+
+        canonical_name = item.get("canonical_name")
+        if canonical_name not in allowed_set:
+            continue
+
+        mention_type = item.get("mention_type")
+        confidence = item.get("confidence")
+        rationale = item.get("rationale")
+
+        try:
+            confidence = float(confidence)
+        except Exception:
+            confidence = None
+
+        rows.append({
+            "canonical_name": canonical_name,
+            "mention_type": mention_type,
+            "llm_confidence": confidence,
+            "llm_rationale": rationale,
+        })
+
+    return rows
+
+
+def build_thread_firm_pairs(events_df, alias_patterns, detector_client, detector_model, detector_prompt):
+    rows = []
     grouped = events_df.groupby("post_id", dropna=True)
+    canonical_names = [f["canonical_name"] for f in alias_patterns]
 
     for post_id, group in grouped:
         post_rows = group[group["type"] == "post"].copy()
@@ -104,27 +188,55 @@ def build_thread_firm_pairs(events_df, alias_patterns):
         thread_title = post_row.get("title")
         thread_created_utc = post_row.get("created_utc")
         subreddit = post_row.get("subreddit")
-
         thread_text = build_thread_text(group)
-        matches = find_matches(thread_text, alias_patterns)
 
-        for m in matches:
+        regex_hits = regex_matches(thread_text, alias_patterns)
+        regex_candidate_names = [x["canonical_name"] for x in regex_hits]
+        regex_alias_map = {x["canonical_name"]: x["matched_aliases"] for x in regex_hits}
+
+        prompt = build_detector_prompt(
+            detector_prompt,
+            canonical_names=canonical_names,
+            thread_title=thread_title,
+            thread_text=thread_text,
+            regex_candidates=regex_candidate_names,
+        )
+
+        llm_output = call_thread_detector(
+            client=detector_client,
+            model_name=detector_model,
+            prompt=prompt,
+        )
+        llm_hits = normalize_llm_candidates(llm_output, canonical_names)
+
+        llm_map = {x["canonical_name"]: x for x in llm_hits}
+        final_names = sorted(set(regex_candidate_names) | set(llm_map.keys()))
+
+        for canonical_name in final_names:
+            regex_aliases = regex_alias_map.get(canonical_name, [])
+            llm_info = llm_map.get(canonical_name, {})
+
             rows.append({
                 "post_id": post_id,
-                "canonical_name": m["canonical_name"],
-                "matched_aliases": ", ".join(m["matched_aliases"]),
-                "thread_direct_match": True,
+                "canonical_name": canonical_name,
+                "matched_aliases": ", ".join(regex_aliases) if regex_aliases else None,
+                "thread_direct_match": canonical_name in regex_alias_map,
                 "thread_text": thread_text,
                 "thread_title": thread_title,
                 "subreddit": subreddit,
                 "thread_created_utc": thread_created_utc,
-                "candidate_strength": 1.0,
+                "candidate_strength": llm_info.get("llm_confidence"),
+                "mention_type": llm_info.get("mention_type"),
+                "llm_rationale": llm_info.get("llm_rationale"),
             })
+
+        print(f"thread {post_id}: regex={len(regex_hits)} llm={len(llm_hits)} final={len(final_names)}")
 
     if not rows:
         return pd.DataFrame(columns=[
             "post_id", "canonical_name", "matched_aliases", "thread_direct_match",
-            "thread_text", "thread_title", "subreddit", "thread_created_utc", "candidate_strength"
+            "thread_text", "thread_title", "subreddit", "thread_created_utc",
+            "candidate_strength", "mention_type", "llm_rationale"
         ])
 
     return pd.DataFrame(rows).drop_duplicates(subset=["post_id", "canonical_name"])
@@ -139,12 +251,11 @@ def build_event_firm_pairs(events_df, thread_firm_df, alias_patterns):
 
     for _, row in events_df.iterrows():
         event_text = row["event_text"]
-        direct_matches = find_matches(event_text, alias_patterns)
+        direct_matches = regex_matches(event_text, alias_patterns)
         direct_firms = {m["canonical_name"]: m["matched_aliases"] for m in direct_matches}
 
         thread_firms = thread_firm_map.get(row["post_id"], set())
 
-        # direct event matches
         for canonical_name, aliases in direct_firms.items():
             rows.append({
                 "event_id": row["event_id"],
@@ -161,7 +272,6 @@ def build_event_firm_pairs(events_df, thread_firm_df, alias_patterns):
                 "subreddit": row["subreddit"],
             })
 
-        # thread-level inherited candidates
         for canonical_name in thread_firms:
             if canonical_name in direct_firms:
                 continue
@@ -193,20 +303,38 @@ def build_event_firm_pairs(events_df, thread_firm_df, alias_patterns):
 
 def main():
     firms, paths, settings = load_configs()
+    env = load_env(paths["env_path"])
 
     ensure_dir(paths["thread_firm_dir"])
     ensure_dir(paths["event_firm_dir"])
 
+    detector_model = settings["models"]["primary_a"]
+    detector_prompt = load_prompt(str(Path(__file__).resolve().parents[1] / "prompts" / "relevance_prompt.txt"))
+
+    if not env["ANTHROPIC_API_KEY"]:
+        raise ValueError("ANTHROPIC_API_KEY missing from env")
+
+    detector_client = Anthropic(api_key=env["ANTHROPIC_API_KEY"])
+
     alias_patterns = build_alias_patterns(firms)
     events_df = load_latest_events(paths["events_dir"]).copy()
-
     events_df["event_text"] = events_df.apply(assemble_event_text, axis=1)
 
-    thread_firm_df = build_thread_firm_pairs(events_df, alias_patterns)
-    event_firm_df = build_event_firm_pairs(events_df, thread_firm_df, alias_patterns)
+    thread_firm_df = build_thread_firm_pairs(
+        events_df=events_df,
+        alias_patterns=alias_patterns,
+        detector_client=detector_client,
+        detector_model=detector_model,
+        detector_prompt=detector_prompt,
+    )
+
+    event_firm_df = build_event_firm_pairs(
+        events_df=events_df,
+        thread_firm_df=thread_firm_df,
+        alias_patterns=alias_patterns,
+    )
 
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-
     thread_out = Path(paths["thread_firm_dir"]) / f"thread_firm_pairs_{ts}.parquet"
     event_out = Path(paths["event_firm_dir"]) / f"event_firm_pairs_{ts}.parquet"
 
