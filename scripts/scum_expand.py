@@ -308,7 +308,7 @@ def main():
     ensure_dir(paths["thread_firm_dir"])
     ensure_dir(paths["event_firm_dir"])
 
-    detector_model = settings["models"]["primary_a"]
+    detector_model = settings["models"]["expand"]["thread_detector"]
     detector_prompt = load_prompt(str(Path(__file__).resolve().parents[1] / "prompts" / "relevance_prompt.txt"))
 
     if not env["ANTHROPIC_API_KEY"]:
