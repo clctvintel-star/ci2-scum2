@@ -4,20 +4,26 @@ firms:
       - Citadel
       - Citadel LLC
       - Ken Griffin
-    risky_aliases: []
+      - Cit
+    risky_aliases:
+      - Cit
 
   - canonical_name: Millennium
     aliases:
       - Millennium
       - Millennium Management
       - Izzy Englander
-    risky_aliases: []
+      - Mil
+    risky_aliases:
+      - Millennium
+      - Mil
 
   - canonical_name: Point72
     aliases:
       - Point72
       - Point 72
       - Steve Cohen
+      - P72
     risky_aliases: []
 
   - canonical_name: D.E. Shaw
@@ -26,13 +32,22 @@ firms:
       - DE Shaw
       - D E Shaw
       - DEShaw
-    risky_aliases: []
+      - Shaw
+      - Desco
+    risky_aliases:
+      - Shaw
 
   - canonical_name: Two Sigma
     aliases:
       - Two Sigma
       - TwoSigma
-    risky_aliases: []
+      - 2 Sigma
+      - 2sigma
+      - 2sig
+      - TS
+    risky_aliases:
+      - 2sig
+      - TS
 
   - canonical_name: Balyasny
     aliases:
@@ -45,6 +60,7 @@ firms:
   - canonical_name: Hudson River Trading
     aliases:
       - Hudson River Trading
+      - HRT
     risky_aliases:
       - HRT
 
@@ -58,7 +74,11 @@ firms:
   - canonical_name: Jane Street
     aliases:
       - Jane Street
-    risky_aliases: []
+      - Jane
+      - JS
+    risky_aliases:
+      - Jane
+      - JS
 
   - canonical_name: ExodusPoint
     aliases:
