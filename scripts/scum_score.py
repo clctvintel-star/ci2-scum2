@@ -375,10 +375,10 @@ def main():
     primary_prompt_template = read_text(Path("prompts/scum_primary_prompt.txt"))
     tiebreaker_prompt_template = read_text(Path("prompts/scum_tiebreaker_prompt.txt"))
 
-    relevance_model = "gpt-4o-mini"
-    primary_a_model = settings["models"]["primary_a"]
-    primary_b_model = settings["models"]["primary_b"]
-    tiebreaker_model = settings["models"]["tiebreaker"]
+    relevance_model = settings["models"]["score"]["relevance_filter"]
+    primary_a_model = settings["models"]["score"]["primary_a"]
+    primary_b_model = settings["models"]["score"]["primary_b"]
+    tiebreaker_model = settings["models"]["score"]["tiebreaker"]
 
     retry_limit = settings["scoring"]["retry_limit"]
     request_timeout = settings["scoring"]["request_timeout"]
