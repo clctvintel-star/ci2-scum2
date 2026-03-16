@@ -129,7 +129,7 @@ def search_reddit_urls(query, serpapi_key, max_pages, num):
     for page in range(max_pages):
         params = {
             "engine": "google",
-            "q": f"\"{query}\" site:reddit.com/comments",
+            "q": f"\"{query}\" site:reddit.com",
             "api_key": serpapi_key,
             "num": num,
             "start": page * num,
