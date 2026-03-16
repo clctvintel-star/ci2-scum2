@@ -134,9 +134,14 @@ def search_reddit_urls(query, serpapi_key, max_pages, num):
             "num": num,
             "start": page * num,
         }
-
         search = GoogleSearch(params)
         results = search.get_dict()
+
+        print("\nSERPAPI PARAMS:")
+        print(params)
+        print("SERPAPI RAW RESULT:")
+        print(results)
+
         organic = results.get("organic_results", [])
 
         if not organic:
