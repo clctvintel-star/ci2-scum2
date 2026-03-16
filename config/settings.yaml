@@ -22,6 +22,7 @@ scoring:
   retry_limit: 3
   request_timeout: 20
   min_relevance_for_scoring: 0.25
+  uncertain_keep_threshold: 0.85
 
 models:
   expand:
@@ -29,6 +30,7 @@ models:
 
   score:
     relevance_filter: gpt-4o-mini
+    uncertain_adjudicator: gpt-4o
     primary_a: claude-haiku-4-5
     primary_b: gpt-4o-mini
     tiebreaker: gpt-4o
