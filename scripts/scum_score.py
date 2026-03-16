@@ -76,6 +76,14 @@ def clamp_float(value: Optional[float], min_val: float, max_val: float) -> Optio
     return max(min_val, min(max_val, value))
 
 
+def safe_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, float) and pd.isna(value):
+        return ""
+    return str(value).strip()
+
+
 # --------------------------------------------------
 # parsing
 # --------------------------------------------------
@@ -152,7 +160,6 @@ def extract_json_payload(text: Any) -> Optional[Dict[str, Any]]:
     if not text:
         return None
 
-    # Try full response
     try:
         payload = json.loads(text)
         if isinstance(payload, dict):
@@ -160,7 +167,6 @@ def extract_json_payload(text: Any) -> Optional[Dict[str, Any]]:
     except Exception:
         pass
 
-    # Try first JSON object
     m = re.search(r"\{.*\}", text, flags=re.DOTALL)
     if m:
         block = m.group(0)
@@ -211,7 +217,6 @@ def parse_sentiment_response(text: Any) -> Tuple[Optional[float], Optional[float
     sentiment = clamp_float(sentiment, -1.0, 1.0)
     confidence = clamp_float(confidence, 0.0, 1.0)
 
-    # Normalize null / zero semantics
     if sentiment is None:
         confidence = 0.0 if confidence is None else confidence
 
@@ -252,6 +257,69 @@ def should_trigger_solomon(
         return True
 
     return False
+
+
+# --------------------------------------------------
+# parent context
+# --------------------------------------------------
+
+def normalize_reddit_id(raw_id: Any) -> str:
+    raw_id = safe_text(raw_id)
+    if not raw_id:
+        return ""
+    return re.sub(r"^(t1_|t3_)", "", raw_id)
+
+
+def build_parent_lookup(events_df: pd.DataFrame) -> Tuple[Dict[str, str], Dict[str, str]]:
+    """
+    Returns:
+      post_text_map[post_id] = post event_text
+      comment_text_map[comment_id] = comment event_text
+    """
+    post_text_map: Dict[str, str] = {}
+    comment_text_map: Dict[str, str] = {}
+
+    for _, row in events_df.iterrows():
+        event_text = safe_text(row.get("event_text"))
+        post_id = normalize_reddit_id(row.get("post_id"))
+        comment_id = normalize_reddit_id(row.get("comment_id"))
+        row_type = safe_text(row.get("type")).lower()
+
+        if row_type == "post":
+            if post_id and event_text and post_id not in post_text_map:
+                post_text_map[post_id] = event_text
+
+        if comment_id and event_text and comment_id not in comment_text_map:
+            comment_text_map[comment_id] = event_text
+
+    return post_text_map, comment_text_map
+
+
+def get_parent_text(
+    row: pd.Series,
+    post_text_map: Dict[str, str],
+    comment_text_map: Dict[str, str],
+) -> str:
+    parent_id = safe_text(row.get("parent_id"))
+    if not parent_id:
+        return ""
+
+    if parent_id.startswith("t1_"):
+        parent_comment_id = normalize_reddit_id(parent_id)
+        return comment_text_map.get(parent_comment_id, "")
+
+    if parent_id.startswith("t3_"):
+        parent_post_id = normalize_reddit_id(parent_id)
+        return post_text_map.get(parent_post_id, "")
+
+    # fallback if raw parent_id has no prefix
+    parent_norm = normalize_reddit_id(parent_id)
+    if parent_norm in comment_text_map:
+        return comment_text_map[parent_norm]
+    if parent_norm in post_text_map:
+        return post_text_map[parent_norm]
+
+    return ""
 
 
 # --------------------------------------------------
@@ -470,17 +538,19 @@ def call_and_parse_sentiment(
 
 def build_format_payload(
     row,
+    parent_text: str = "",
     model_a_sentiment=None,
     model_a_confidence=None,
     model_b_sentiment=None,
     model_b_confidence=None,
 ):
-    thread_title = row.get("thread_title", "") or ""
-    thread_text = row.get("thread_text", "") or ""
-    event_text = row.get("event_text", "") or ""
-    matched_aliases = row.get("matched_aliases", "") or ""
-    candidate_source = row.get("candidate_source", "") or ""
-    firm_name = row.get("canonical_name", "") or ""
+    thread_title = safe_text(row.get("thread_title"))
+    thread_text = safe_text(row.get("thread_text"))
+    event_text = safe_text(row.get("event_text"))
+    matched_aliases = safe_text(row.get("matched_aliases"))
+    candidate_source = safe_text(row.get("candidate_source"))
+    firm_name = safe_text(row.get("canonical_name"))
+    parent_text = safe_text(parent_text)
 
     return SafeDict(
         {
@@ -491,7 +561,7 @@ def build_format_payload(
             "THREAD_TITLE": thread_title,
             "THREAD_TEXT": thread_text,
             "THREAD_POST": thread_text,
-            "PARENT_TEXT": "",
+            "PARENT_TEXT": parent_text,
             "EVENT_TEXT": event_text,
             "MODEL_A_SENTIMENT": "" if model_a_sentiment is None else model_a_sentiment,
             "MODEL_A_CONFIDENCE": "" if model_a_confidence is None else model_a_confidence,
@@ -499,7 +569,7 @@ def build_format_payload(
             "MODEL_B_CONFIDENCE": "" if model_b_confidence is None else model_b_confidence,
             # backward-compat placeholders
             "title": thread_title,
-            "post": f"Thread context:\n{thread_text}\n\nEvent text:\n{event_text}",
+            "post": f"Thread context:\n{thread_text}\n\nParent text:\n{parent_text}\n\nEvent text:\n{event_text}",
             "comments": "",
         }
     )
@@ -542,6 +612,8 @@ def main():
     event_df = pd.read_parquet(latest_event_file)
     thread_df = pd.read_parquet(latest_thread_file)
 
+    post_text_map, comment_text_map = build_parent_lookup(event_df)
+
     merge_cols = [
         "post_id",
         "canonical_name",
@@ -556,10 +628,16 @@ def main():
         how="left",
     )
 
+    scored_df["parent_text"] = scored_df.apply(
+        lambda r: get_parent_text(r, post_text_map=post_text_map, comment_text_map=comment_text_map),
+        axis=1,
+    )
+
     if args.limit is not None:
         scored_df = scored_df.head(args.limit).copy()
 
     out_cols = [
+        "parent_text",
         "relevance_decision",
         "relevance_confidence",
         "relevance_reason",
@@ -589,7 +667,9 @@ def main():
     rows_since_save = 0
 
     for idx, row in scored_df.iterrows():
-        relevance_payload = build_format_payload(row)
+        parent_text = safe_text(row.get("parent_text"))
+
+        relevance_payload = build_format_payload(row, parent_text=parent_text)
         relevance_prompt = relevance_prompt_template.format_map(relevance_payload)
 
         relevance_text = call_model(
@@ -612,7 +692,6 @@ def main():
 
         effective_rel = rel_decision
 
-        # hard DROP
         if rel_decision == "DROP":
             scored_df.at[idx, "effective_relevance_decision"] = "DROP"
             print(f"DROP: {row['event_id']} / {row['canonical_name']}")
@@ -625,9 +704,8 @@ def main():
 
             continue
 
-        # adjudicate uncertain exactly once
         if rel_decision == "UNCERTAIN":
-            uncertain_payload = build_format_payload(row)
+            uncertain_payload = build_format_payload(row, parent_text=parent_text)
             uncertain_prompt = uncertain_prompt_template.format_map(uncertain_payload)
 
             uncertain_text = call_model(
@@ -668,8 +746,7 @@ def main():
 
         scored_df.at[idx, "effective_relevance_decision"] = effective_rel
 
-        # primary scoring
-        primary_payload = build_format_payload(row)
+        primary_payload = build_format_payload(row, parent_text=parent_text)
         primary_prompt = primary_prompt_template.format_map(primary_payload)
 
         a_s, a_c, _a_reason, a_raw = call_and_parse_sentiment(
@@ -723,6 +800,7 @@ def main():
         if solomon:
             tie_payload = build_format_payload(
                 row,
+                parent_text=parent_text,
                 model_a_sentiment=a_s,
                 model_a_confidence=a_c,
                 model_b_sentiment=b_s,
