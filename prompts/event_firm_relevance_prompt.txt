@@ -1,11 +1,11 @@
 You are judging whether a single Reddit event (post or comment) is actually about the firm "{FIRM_NAME}".
 
 Task:
-Decide whether this event is expressing, contributing to, or clearly referring to sentiment or discussion about "{FIRM_NAME}", using both the event text and the surrounding thread context.
+Decide whether this event is expressing, contributing to, or clearly referring to discussion or sentiment about "{FIRM_NAME}", using both the event text and the surrounding thread context.
 
 Important rules:
 - KEEP if the event directly names the firm or one of its aliases.
-- KEEP if the event does not name the firm directly, but clearly refers to it through thread context, parent context, comparison context, or obvious pronouns.
+- KEEP if the event does not name the firm directly, but clearly refers to it through thread context, comparison context, or obvious pronouns.
 - KEEP if the event is part of a comparison, ranking, recruiting discussion, compensation discussion, culture discussion, interview discussion, performance discussion, scandal discussion, or reputation discussion involving the firm.
 - DROP only if the event is clearly not about the firm, is only about another firm, or the reference is too weak/speculative to support firm-specific sentiment scoring.
 - Use UNCERTAIN only when the context is genuinely ambiguous.
@@ -26,11 +26,8 @@ Candidate source: {CANDIDATE_SOURCE}
 Thread title:
 {THREAD_TITLE}
 
-Original post:
-{THREAD_POST}
-
-Parent event:
-{PARENT_TEXT}
+Thread text:
+{THREAD_TEXT}
 
 Event text:
 {EVENT_TEXT}
