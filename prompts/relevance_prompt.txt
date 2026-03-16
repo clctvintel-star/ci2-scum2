@@ -1,3 +1,7 @@
+#Note to self: This prompt pertains to thred expansion
+
+PROMPT:
+
 You are identifying which hedge funds from a fixed universe are genuinely mentioned or clearly referred to in a Reddit thread.
 
 Choose ONLY from this firm universe:
