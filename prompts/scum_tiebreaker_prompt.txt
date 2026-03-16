@@ -27,11 +27,11 @@ Model B confidence: {MODEL_B_CONFIDENCE}
 
 Return ONLY JSON:
 
-{
+{{
   "sentiment": <float from -1.0 to 1.0 or null>,
   "confidence": <float from 0.0 to 1.0>,
-  "explanation": "<one or two sentences explaining the decision>"
-}
+  "explanation": "<one or two sentences>"
+}}
 
 Firm: {FUND_NAME}
 Matched aliases: {MATCHED_ALIASES}
