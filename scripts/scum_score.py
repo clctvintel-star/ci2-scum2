@@ -408,6 +408,10 @@ def main():
             temperature=0.2,
             retry_limit=retry_limit,
         )
+        print("\n--- GEMINI RAW OUTPUT ---")
+        print(b_text)
+        print("--- END GEMINI RAW OUTPUT ---\n")
+        
         b_s, b_c, _ = parse_sentiment_response(b_text)
         b_scum = scum_score(b_s, b_c)
 
