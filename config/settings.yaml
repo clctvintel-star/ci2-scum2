@@ -1,4 +1,3 @@
-
 subreddits:
   - financialcareers
   - quant
@@ -25,9 +24,14 @@ scoring:
   min_relevance_for_scoring: 0.25
 
 models:
-  primary_a: claude-haiku-4-5
-  primary_b: gemini-2.5-flash
-  tiebreaker: gpt-4o
+  expand:
+    thread_detector: claude-haiku-4-5
+
+  score:
+    relevance_filter: gpt-4o-mini
+    primary_a: claude-haiku-4-5
+    primary_b: gpt-4o-mini
+    tiebreaker: gpt-4o
 
 aggregation:
   ma_windows:
