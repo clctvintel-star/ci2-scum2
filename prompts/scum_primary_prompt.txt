@@ -1,50 +1,35 @@
 You are scoring ONE Reddit event for hedge fund reputation analysis.
 
-Your job:
+Task:
 Evaluate how this specific EVENT TEXT affects the perceived reputation of "{FUND_NAME}" from the perspective of a potential job applicant.
 
 Important:
 - Score sentiment ABOUT "{FUND_NAME}" only.
 - The EVENT TEXT is the primary unit of analysis.
-- Use THREAD TITLE and THREAD TEXT only to resolve shorthand, pronouns, comparisons, sarcasm, or indirect references.
-- Do NOT score the whole thread. Score only the specific event.
-- Do NOT score sentiment about other firms unless the comparison clearly changes perception of "{FUND_NAME}".
+- Use THREAD TITLE and THREAD TEXT only to resolve shorthand, aliases, pronouns, sarcasm, comparisons, or indirect reference.
+- Do NOT score the whole thread.
+- Do NOT score other firms unless comparison clearly changes perception of "{FUND_NAME}".
 
 Job-seeker framing:
-Signals that matter include prestige, pay, performance, culture, working conditions, hiring difficulty, elite status, exits, scandals, layoffs, toxicity, burnout, and whether someone would want to work there.
+Signals that matter include prestige, pay, performance, culture, working conditions, hiring difficulty, elite status, exits, scandals, instability, layoffs, toxicity, burnout, and whether someone would want to work there.
 
-Positive examples:
-- strong praise for the firm
-- “top fund,” “elite,” “best,” “great place to work”
-- high pay, strong performance, strong reputation
-- strong learning, strong exits, strong résumé value
-
-Negative examples:
-- toxicity, burnout, brutal hours, bad culture
-- mockery, warnings to avoid the firm
-- scandals, lawsuits, instability, layoffs
-- poor performance or reputational damage
-
-Scoring rules:
-- Use a real directional score when a real directional signal exists.
-- Mild signals should get mild scores.
-- Strong signals should use more of the range.
-- Use 0 only when the event is truly mixed/neutral in its effect.
+Directional guidance:
+- Use a directional score when the event has a directional effect.
+- Do not default to 0.0 just because the signal is mild.
+- Do not default to 0.0 just because the event contains both positives and negatives; use the net effect.
+- Use 0.0 only when the event is truly mixed or neutral in its effect.
 - Use null only if the event is not actually about "{FUND_NAME}".
 
-Confidence rules:
-- High confidence: explicit statement about "{FUND_NAME}"
-- Medium confidence: indirect but still clear from context
-- Low confidence: weak or ambiguous signal
-- Confidence = 0 only if the event is unrelated to "{FUND_NAME}"
+Confidence guidance:
+- High confidence = explicit firm-specific statement
+- Medium confidence = indirect but clear from context
+- Low confidence = weak but still real signal
+- Confidence must be 0 only if the event is unrelated to the firm
 
-Output rules:
-- Return valid JSON only.
-- No markdown fences.
-- No extra text.
-- The JSON must be complete and parseable.
-
-Return exactly this JSON schema:
+Return valid JSON only.
+No markdown fences.
+No extra text.
+Return exactly this object shape:
 
 {{
   "sentiment": <number from -1.0 to 1.0 or null>,
