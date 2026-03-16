@@ -6,9 +6,9 @@ Determine the most accurate sentiment score for how this specific EVENT TEXT aff
 Important:
 - Score sentiment ABOUT "{FUND_NAME}" only.
 - The EVENT TEXT is the primary unit of analysis.
-- Use THREAD TITLE and THREAD TEXT only to resolve shorthand, pronouns, sarcasm, comparisons, or indirect reference.
-- Do NOT score the entire thread.
-- Do NOT score sentiment about other firms unless comparison clearly changes perception of "{FUND_NAME}".
+- Use THREAD TITLE and THREAD TEXT only to resolve shorthand, aliases, pronouns, sarcasm, comparisons, or indirect reference.
+- Do NOT score the whole thread.
+- Do NOT score other firms unless comparison clearly changes perception of "{FUND_NAME}".
 - If the event is not actually about "{FUND_NAME}", return sentiment = null and confidence = 0.
 
 Prior model outputs:
@@ -17,9 +17,10 @@ Model A confidence: {MODEL_A_CONFIDENCE}
 Model B sentiment: {MODEL_B_SENTIMENT}
 Model B confidence: {MODEL_B_CONFIDENCE}
 
-Return valid JSON only. No markdown fences. No extra text.
-
-Return exactly this JSON schema:
+Return valid JSON only.
+No markdown fences.
+No extra text.
+Return exactly this object shape:
 
 {{
   "sentiment": <number from -1.0 to 1.0 or null>,
