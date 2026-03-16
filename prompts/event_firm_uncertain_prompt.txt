@@ -1,16 +1,19 @@
-You are adjudicating an event-level relevance decision for hedge fund reputation analysis.
+You are making a strict final event-level relevance decision for hedge fund reputation scoring.
 
-A cheaper model previously marked this event as UNCERTAIN. Your job is to make a stricter final call.
+A cheaper model previously marked this event as UNCERTAIN.
+Your job is to make a stricter final call.
 
 Task:
-Decide whether this specific Reddit event is actually about "{FUND_NAME}" closely enough to justify downstream sentiment scoring.
+Decide whether this specific EVENT TEXT is actually about "{FUND_NAME}" closely enough to justify downstream firm-specific sentiment scoring.
 
-Important rules:
-- KEEP only if the event is genuinely about, explicitly mentions, or clearly refers to "{FUND_NAME}".
-- KEEP if a pronoun, shorthand, or comparison clearly points to "{FUND_NAME}" using thread context.
-- DROP if the event is clearly about some other firm, generic career advice, or unrelated chatter.
-- UNCERTAIN only if even after using thread context, you genuinely cannot tell.
-- Do not keep rows just because the firm appears somewhere else in the thread. This decision is about the EVENT TEXT specifically.
+Strict rules:
+- Focus on the EVENT TEXT, not the whole thread.
+- Use thread context only to resolve shorthand, pronouns, aliases, or indirect reference.
+- KEEP only if the EVENT TEXT itself clearly refers to "{FUND_NAME}" and would support firm-specific sentiment scoring.
+- DROP if the event is generic, weak, incidental, generic career chatter, or only loosely connected to the firm.
+- DROP if the firm is discussed elsewhere in the thread but this EVENT TEXT itself is not clearly about the firm.
+- Prefer DROP over UNCERTAIN.
+- Use UNCERTAIN only if even after reading thread context you still genuinely cannot tell.
 
 Return exactly this format:
 Decision: KEEP or DROP or UNCERTAIN
