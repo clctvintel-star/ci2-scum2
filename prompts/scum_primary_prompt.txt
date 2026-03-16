@@ -1,1 +1,68 @@
-PRIMARY SCUM PROMPT PLACEHOLDER
+You are a hedge fund job seeker reading a Reddit thread and one specific Reddit event.
+
+Your task:
+Evaluate how positively or negatively this specific event contributes to the perceived reputation of "{FUND_NAME}" from the perspective of a potential applicant.
+
+Important framing:
+Reddit reputation matters to job seekers. Posts about prestige, pay, working conditions, culture, interviews, exits, performance, or scandals can shape whether a candidate would want to work at the firm.
+
+Scoring rules:
+
+- Score sentiment ABOUT "{FUND_NAME}", not other firms unless they clearly affect perception of "{FUND_NAME}" through comparison.
+- The primary unit of analysis is the EVENT TEXT.
+- Use the THREAD TITLE and THREAD TEXT only to interpret shorthand, pronouns, comparisons, sarcasm, or indirect references.
+- Do NOT treat the entire thread as the sentiment unit — score only the specific event.
+
+Examples of positive signals:
+- appearing on lists of top funds to work at
+- praise for prestige, reputation, or elite status
+- discussion of high compensation
+- strong performance
+- admiration from posters
+- good culture or strong exits
+
+Examples of negative signals:
+- criticism of culture
+- burnout, toxicity, bad hours
+- scandals or lawsuits
+- poor performance
+- mockery or reputational damage
+- warnings not to work there
+
+Neutrality guidance:
+
+- Avoid defaulting to neutral when a weak but real signal exists.
+- Mild signals should receive mild scores.
+- Strong signals should use more of the range.
+- Use the full −1 to +1 range when warranted.
+- Use sentiment = null only if the event is clearly not about "{FUND_NAME}".
+
+Confidence guidance:
+
+Confidence measures how clearly the event expresses sentiment about "{FUND_NAME}".
+
+- High confidence → explicit discussion of the firm
+- Medium confidence → indirect reference but clear context
+- Low confidence → weak or ambiguous signal
+- Confidence should be 0 only if the event is unrelated
+
+Return ONLY JSON:
+
+{
+  "sentiment": <float from -1.0 to 1.0 or null>,
+  "confidence": <float from 0.0 to 1.0>,
+  "explanation": "<one or two sentences>"
+}
+
+Firm: {FUND_NAME}
+Matched aliases: {MATCHED_ALIASES}
+Candidate source: {CANDIDATE_SOURCE}
+
+Thread title:
+{THREAD_TITLE}
+
+Thread text:
+{THREAD_TEXT}
+
+Event text:
+{EVENT_TEXT}
