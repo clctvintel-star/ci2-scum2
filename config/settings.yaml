@@ -1,1 +1,36 @@
 
+subreddits:
+  - financialcareers
+  - quant
+  - cscareerquestions
+  - hedgefund
+  - csmajors
+  - internships
+  - finance
+
+collection:
+  max_serpapi_pages: 2
+  serpapi_num: 100
+  depth_cap: 3
+  window_days: 60
+  score_min: 1
+  autosave_every_n_posts: 25
+
+scoring:
+  max_comments_for_prompt: 20
+  autosave_every_n_rows: 25
+  disagree_threshold: 0.3
+  retry_limit: 3
+  request_timeout: 20
+  min_relevance_for_scoring: 0.25
+
+models:
+  primary_a: claude-3-5-haiku-latest
+  primary_b: gemini-2.5-pro
+  tiebreaker: gpt-4o
+
+aggregation:
+  ma_windows:
+    - 28
+    - 90
+  thread_daily_weight_cap: 0.25
