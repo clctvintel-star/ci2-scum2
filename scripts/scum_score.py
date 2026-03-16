@@ -21,6 +21,7 @@ from utils import load_configs, load_env, ensure_dir
 def parse_args():
     parser = argparse.ArgumentParser(description="SCUM2 event-level scorer")
     parser.add_argument("--limit", type=int, default=None, help="Optional row limit for testing")
+    parser.add_argument("--debug-gemini", action="store_true", help="Print raw Gemini outputs")
     return parser.parse_args()
 
 
@@ -54,6 +55,9 @@ def scum_score(sentiment, confidence):
 
 
 def parse_relevance_response(text):
+    if not isinstance(text, str):
+        return None, None, None
+
     decision = None
     confidence = None
     reason = None
@@ -64,7 +68,10 @@ def parse_relevance_response(text):
 
     m = re.search(r"Confidence:\s*([0-9]*\.?[0-9]+)", text, flags=re.IGNORECASE)
     if m:
-        confidence = float(m.group(1))
+        try:
+            confidence = float(m.group(1))
+        except Exception:
+            confidence = None
 
     m = re.search(r"Reason:\s*(.+)", text, flags=re.IGNORECASE | re.DOTALL)
     if m:
@@ -76,9 +83,26 @@ def parse_relevance_response(text):
 def extract_json_block(text):
     if not isinstance(text, str):
         return None
+
+    text = text.strip()
+    if not text:
+        return None
+
+    # Remove markdown fences if present
+    text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s*```$", "", text)
+
+    # First try full text
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+
+    # Then try to pull a JSON object block
     m = re.search(r"\{.*\}", text, flags=re.DOTALL)
     if not m:
         return None
+
     block = m.group(0)
 
     try:
@@ -86,6 +110,7 @@ def extract_json_block(text):
     except Exception:
         pass
 
+    # Loose fallback for single quotes
     try:
         block2 = re.sub(r"(?<!\\)'", '"', block)
         return json.loads(block2)
@@ -95,7 +120,7 @@ def extract_json_block(text):
 
 def parse_sentiment_response(text):
     payload = extract_json_block(text)
-    if not payload:
+    if not payload or not isinstance(payload, dict):
         return None, None, None
 
     sentiment = payload.get("sentiment")
@@ -142,8 +167,21 @@ def build_clients(env):
     return anthropic_client, openai_client, gemini_client
 
 
-def call_anthropic(client, model_name, prompt, timeout_seconds=20, max_tokens=800, temperature=0.2, retry_limit=3):
+# --------------------------------------------------
+# model calls
+# --------------------------------------------------
+
+def call_anthropic(
+    client,
+    model_name,
+    prompt,
+    timeout_seconds=20,
+    max_tokens=800,
+    temperature=0.2,
+    retry_limit=3,
+):
     last_err = None
+
     for _ in range(retry_limit):
         try:
             resp = client.messages.create(
@@ -159,11 +197,21 @@ def call_anthropic(client, model_name, prompt, timeout_seconds=20, max_tokens=80
             last_err = e
             print(f"Anthropic error ({model_name}), retrying: {e}")
             time.sleep(1)
+
     raise RuntimeError(f"Anthropic failed for {model_name}: {last_err}")
 
 
-def call_openai(client, model_name, prompt, timeout_seconds=20, max_tokens=800, temperature=0.2, retry_limit=3):
+def call_openai(
+    client,
+    model_name,
+    prompt,
+    timeout_seconds=20,
+    max_tokens=800,
+    temperature=0.2,
+    retry_limit=3,
+):
     last_err = None
+
     for _ in range(retry_limit):
         try:
             resp = client.chat.completions.create(
@@ -181,10 +229,21 @@ def call_openai(client, model_name, prompt, timeout_seconds=20, max_tokens=800, 
             last_err = e
             print(f"OpenAI error ({model_name}), retrying: {e}")
             time.sleep(1)
+
     raise RuntimeError(f"OpenAI failed for {model_name}: {last_err}")
 
-def call_gemini(client, model_name, prompt, timeout_seconds=20, max_output_tokens=200, temperature=0.1, retry_limit=3):
+
+def call_gemini(
+    client,
+    model_name,
+    prompt,
+    timeout_seconds=20,
+    max_output_tokens=400,
+    temperature=0.1,
+    retry_limit=3,
+):
     last_err = None
+
     for _ in range(retry_limit):
         try:
             resp = client.models.generate_content(
@@ -196,15 +255,32 @@ def call_gemini(client, model_name, prompt, timeout_seconds=20, max_output_token
                     "response_mime_type": "application/json",
                 },
             )
-            return resp.text.strip()
+
+            text = getattr(resp, "text", None)
+            if text:
+                return text.strip()
+
+            return str(resp)
+
         except Exception as e:
             last_err = e
             print(f"Gemini error ({model_name}), retrying: {e}")
             time.sleep(1)
+
     raise RuntimeError(f"Gemini failed for {model_name}: {last_err}")
 
 
-def call_model(model_name, prompt, anthropic_client, openai_client, gemini_client, timeout_seconds=20, max_tokens=800, temperature=0.2, retry_limit=3):
+def call_model(
+    model_name,
+    prompt,
+    anthropic_client,
+    openai_client,
+    gemini_client,
+    timeout_seconds=20,
+    max_tokens=800,
+    temperature=0.2,
+    retry_limit=3,
+):
     if model_name.startswith("claude"):
         return call_anthropic(
             client=anthropic_client,
@@ -215,6 +291,7 @@ def call_model(model_name, prompt, anthropic_client, openai_client, gemini_clien
             temperature=temperature,
             retry_limit=retry_limit,
         )
+
     if model_name.startswith("gpt"):
         return call_openai(
             client=openai_client,
@@ -225,20 +302,26 @@ def call_model(model_name, prompt, anthropic_client, openai_client, gemini_clien
             temperature=temperature,
             retry_limit=retry_limit,
         )
+
     if model_name.startswith("gemini"):
         return call_gemini(
             client=gemini_client,
             model_name=model_name,
             prompt=prompt,
             timeout_seconds=timeout_seconds,
-            max_output_tokens=max_tokens,
+            max_output_tokens=max(300, max_tokens),
             temperature=temperature,
             retry_limit=retry_limit,
         )
+
     raise ValueError(f"Unsupported model family: {model_name}")
 
 
-def build_format_payload(row):
+# --------------------------------------------------
+# prompt payload
+# --------------------------------------------------
+
+def build_format_payload(row, model_a_sentiment=None, model_a_confidence=None, model_b_sentiment=None, model_b_confidence=None):
     thread_title = row.get("thread_title", "") or ""
     thread_text = row.get("thread_text", "") or ""
     event_text = row.get("event_text", "") or ""
@@ -256,10 +339,22 @@ def build_format_payload(row):
         "THREAD_POST": thread_text,
         "PARENT_TEXT": "",
         "EVENT_TEXT": event_text,
+        "MODEL_A_SENTIMENT": "" if model_a_sentiment is None else model_a_sentiment,
+        "MODEL_A_CONFIDENCE": "" if model_a_confidence is None else model_a_confidence,
+        "MODEL_B_SENTIMENT": "" if model_b_sentiment is None else model_b_sentiment,
+        "MODEL_B_CONFIDENCE": "" if model_b_confidence is None else model_b_confidence,
+        # backward-compat placeholders
         "title": thread_title,
         "post": f"Thread context:\n{thread_text}\n\nEvent text:\n{event_text}",
         "comments": "",
     })
+
+
+def autosave_df(df, outdir):
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    outfile = Path(outdir) / f"scored_events_{ts}.parquet"
+    df.to_parquet(outfile, index=False)
+    return outfile
 
 
 # --------------------------------------------------
@@ -269,43 +364,41 @@ def build_format_payload(row):
 def main():
     args = parse_args()
 
-    firms, paths, settings = load_configs()
+    _, paths, settings = load_configs()
     env = load_env(paths["env_path"])
 
     ensure_dir(paths["scored_events_dir"])
 
     anthropic_client, openai_client, gemini_client = build_clients(env)
 
-    # prompt paths
-    relevance_prompt_path = Path("prompts/event_firm_relevance_prompt.txt")
-    primary_prompt_path = Path("prompts/scum_primary_prompt.txt")
-    tiebreaker_prompt_path = Path("prompts/scum_tiebreaker_prompt.txt")
+    relevance_prompt_template = read_text(Path("prompts/event_firm_relevance_prompt.txt"))
+    primary_prompt_template = read_text(Path("prompts/scum_primary_prompt.txt"))
+    tiebreaker_prompt_template = read_text(Path("prompts/scum_tiebreaker_prompt.txt"))
 
-    relevance_prompt_template = read_text(relevance_prompt_path)
-    primary_prompt_template = read_text(primary_prompt_path)
-    tiebreaker_prompt_template = read_text(tiebreaker_prompt_path)
-
-    # models
     relevance_model = "gpt-4o-mini"
-    primary_a_model = settings["models"]["primary_a"]          # claude-haiku-4-5
-    primary_b_model = settings["models"]["primary_b"]          # gemini-2.5-flash
-    tiebreaker_model = settings["models"]["tiebreaker"]        # gpt-4o
+    primary_a_model = settings["models"]["primary_a"]
+    primary_b_model = settings["models"]["primary_b"]
+    tiebreaker_model = settings["models"]["tiebreaker"]
 
-    # settings
     retry_limit = settings["scoring"]["retry_limit"]
     request_timeout = settings["scoring"]["request_timeout"]
     autosave_every = settings["scoring"]["autosave_every_n_rows"]
     disagree_threshold = settings["scoring"]["disagree_threshold"]
 
-    # load latest expanded outputs
     latest_event_file = latest_parquet(paths["event_firm_dir"])
     latest_thread_file = latest_parquet(paths["thread_firm_dir"])
 
     event_df = pd.read_parquet(latest_event_file)
     thread_df = pd.read_parquet(latest_thread_file)
 
-    # merge thread context onto event rows
-    merge_cols = ["post_id", "canonical_name", "thread_title", "thread_text", "llm_rationale"]
+    merge_cols = [
+        "post_id",
+        "canonical_name",
+        "thread_title",
+        "thread_text",
+        "llm_rationale",
+    ]
+
     scored_df = event_df.merge(
         thread_df[merge_cols].drop_duplicates(subset=["post_id", "canonical_name"]),
         on=["post_id", "canonical_name"],
@@ -315,7 +408,6 @@ def main():
     if args.limit is not None:
         scored_df = scored_df.head(args.limit).copy()
 
-    # initialize output cols
     out_cols = [
         "relevance_decision",
         "relevance_confidence",
@@ -342,12 +434,11 @@ def main():
     rows_since_save = 0
 
     for idx, row in scored_df.iterrows():
-        payload = build_format_payload(row)
-
         # ------------------------------------------
         # 1) cheap event-level firm relevance filter
         # ------------------------------------------
-        relevance_prompt = relevance_prompt_template.format_map(payload)
+        relevance_payload = build_format_payload(row)
+        relevance_prompt = relevance_prompt_template.format_map(relevance_payload)
 
         relevance_text = call_model(
             model_name=relevance_model,
@@ -370,18 +461,19 @@ def main():
         if rel_decision == "DROP":
             print(f"DROP: {row['event_id']} / {row['canonical_name']}")
             rows_since_save += 1
+
             if rows_since_save >= autosave_every:
-                ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-                outfile = Path(paths["scored_events_dir"]) / f"scored_events_{ts}.parquet"
-                scored_df.to_parquet(outfile, index=False)
+                outfile = autosave_df(scored_df, paths["scored_events_dir"])
                 print(f"AUTOSAVED: {outfile}")
                 rows_since_save = 0
+
             continue
 
         # ------------------------------------------
         # 2) primary scoring
         # ------------------------------------------
-        primary_prompt = primary_prompt_template.format_map(payload)
+        primary_payload = build_format_payload(row)
+        primary_prompt = primary_prompt_template.format_map(primary_payload)
 
         a_text = call_model(
             model_name=primary_a_model,
@@ -404,14 +496,16 @@ def main():
             openai_client=openai_client,
             gemini_client=gemini_client,
             timeout_seconds=request_timeout,
-            max_tokens=500,
-            temperature=0.2,
+            max_tokens=400,
+            temperature=0.1,
             retry_limit=retry_limit,
         )
-        print("\n--- GEMINI RAW OUTPUT ---")
-        print(b_text)
-        print("--- END GEMINI RAW OUTPUT ---\n")
-        
+
+        if args.debug_gemini:
+            print("\n--- GEMINI RAW OUTPUT ---")
+            print(b_text)
+            print("--- END GEMINI RAW OUTPUT ---\n")
+
         b_s, b_c, _ = parse_sentiment_response(b_text)
         b_scum = scum_score(b_s, b_c)
 
@@ -434,7 +528,14 @@ def main():
         final_sc = None
 
         if solomon:
-            tie_prompt = tiebreaker_prompt_template.format_map(payload)
+            tie_payload = build_format_payload(
+                row,
+                model_a_sentiment=a_s,
+                model_a_confidence=a_c,
+                model_b_sentiment=b_s,
+                model_b_confidence=b_c,
+            )
+            tie_prompt = tiebreaker_prompt_template.format_map(tie_payload)
 
             t_text = call_model(
                 model_name=tiebreaker_model,
@@ -459,7 +560,6 @@ def main():
             final_c = t_c
             final_sc = t_scum
         else:
-            # average primary outputs
             if not is_missing_score(a_s, a_c) and not is_missing_score(b_s, b_c):
                 final_s = round((a_s + b_s) / 2, 4)
                 final_c = round((a_c + b_c) / 2, 4)
@@ -485,22 +585,18 @@ def main():
 
         rows_since_save += 1
         if rows_since_save >= autosave_every:
-            ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-            outfile = Path(paths["scored_events_dir"]) / f"scored_events_{ts}.parquet"
-            scored_df.to_parquet(outfile, index=False)
+            outfile = autosave_df(scored_df, paths["scored_events_dir"])
             print(f"AUTOSAVED: {outfile}")
             rows_since_save = 0
 
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    outfile = Path(paths["scored_events_dir"]) / f"scored_events_{ts}.parquet"
-    scored_df.to_parquet(outfile, index=False)
+    outfile = autosave_df(scored_df, paths["scored_events_dir"])
 
     print("\nSaved:")
     print(outfile)
     print("\nCounts:")
     print("Rows scored:", len(scored_df))
     print("Relevant rows:", (scored_df["relevance_decision"] != "DROP").sum())
-    print("Solomon triggered:", scored_df["solomon_triggered"].fillna(False).sum())
+    print("Solomon triggered:", int(scored_df["solomon_triggered"].astype("boolean").fillna(False).sum()))
 
 
 if __name__ == "__main__":
