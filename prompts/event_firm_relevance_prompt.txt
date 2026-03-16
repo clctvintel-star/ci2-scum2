@@ -33,3 +33,6 @@ Thread text:
 
 Event text:
 {EVENT_TEXT}
+
+Parent text:
+{PARENT_TEXT}
