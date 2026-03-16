@@ -1,16 +1,17 @@
 project_root: /content/drive/MyDrive/CI2
 env_path: /content/drive/MyDrive/CI2/ci2_keys.env
 
-scum_root: /content/drive/MyDrive/CI2/scum
+db_root: /content/drive/MyDrive/CI2/db
+scum_root: /content/drive/MyDrive/CI2/db/scum2
 
-events_dir: /content/drive/MyDrive/CI2/scum/events
-thread_firm_dir: /content/drive/MyDrive/CI2/scum/thread_firm_pairs
-event_firm_dir: /content/drive/MyDrive/CI2/scum/event_firm_pairs
-scored_events_dir: /content/drive/MyDrive/CI2/scum/scored_events
-post_days_dir: /content/drive/MyDrive/CI2/scum/post_days
-fund_days_dir: /content/drive/MyDrive/CI2/scum/fund_days
+events_dir: /content/drive/MyDrive/CI2/db/scum2/events
+thread_firm_dir: /content/drive/MyDrive/CI2/db/scum2/thread_firm_pairs
+event_firm_dir: /content/drive/MyDrive/CI2/db/scum2/event_firm_pairs
+scored_events_dir: /content/drive/MyDrive/CI2/db/scum2/scored_events
+post_days_dir: /content/drive/MyDrive/CI2/db/scum2/post_days
+fund_days_dir: /content/drive/MyDrive/CI2/db/scum2/fund_days
 
-ledger_path: /content/drive/MyDrive/CI2/scum/discovery_ledger.parquet
+ledger_path: /content/drive/MyDrive/CI2/db/scum2/discovery_ledger.parquet
 
-exports_dir: /content/drive/MyDrive/CI2/exports/scum
-logs_dir: /content/drive/MyDrive/CI2/logs/scum
+exports_dir: /content/drive/MyDrive/CI2/exports/scum2
+logs_dir: /content/drive/MyDrive/CI2/logs/scum2
