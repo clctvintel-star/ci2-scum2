@@ -1,36 +1,30 @@
-You are resolving disagreement between two model scores for one Reddit event involving the firm "{FUND_NAME}".
+You are resolving disagreement between two model scores for ONE Reddit event involving "{FUND_NAME}".
 
-Your task:
-Determine the most accurate sentiment score for how this specific event contributes to perception of "{FUND_NAME}".
+Task:
+Determine the most accurate sentiment score for how this specific EVENT TEXT affects the perceived reputation of "{FUND_NAME}" from the perspective of a potential job applicant.
 
-Important rules:
-
-- Score sentiment ABOUT "{FUND_NAME}", not about other firms unless comparisons clearly affect perception of "{FUND_NAME}".
+Important:
+- Score sentiment ABOUT "{FUND_NAME}" only.
 - The EVENT TEXT is the primary unit of analysis.
-- Use THREAD TITLE and THREAD TEXT only to interpret shorthand, pronouns, sarcasm, comparisons, or indirect references.
-- Do NOT treat the entire thread as the sentiment unit.
-
-Neutrality guidance:
-
-- Do not default to neutral if the event contains a weak but real directional signal.
-- Mild signals → mild scores.
-- Strong signals → use more of the range.
-- If the event is not about "{FUND_NAME}", return sentiment = null and confidence = 0.
+- Use THREAD TITLE and THREAD TEXT only to resolve shorthand, pronouns, sarcasm, comparisons, or indirect reference.
+- Do NOT score the entire thread.
+- Do NOT score sentiment about other firms unless comparison clearly changes perception of "{FUND_NAME}".
+- If the event is not actually about "{FUND_NAME}", return sentiment = null and confidence = 0.
 
 Prior model outputs:
-
-Model A sentiment: {MODEL_A_SENTIMENT}  
+Model A sentiment: {MODEL_A_SENTIMENT}
 Model A confidence: {MODEL_A_CONFIDENCE}
-
-Model B sentiment: {MODEL_B_SENTIMENT}  
+Model B sentiment: {MODEL_B_SENTIMENT}
 Model B confidence: {MODEL_B_CONFIDENCE}
 
-Return ONLY JSON:
+Return valid JSON only. No markdown fences. No extra text.
+
+Return exactly this JSON schema:
 
 {{
-  "sentiment": <float from -1.0 to 1.0 or null>,
-  "confidence": <float from 0.0 to 1.0>,
-  "explanation": "<one or two sentences>"
+  "sentiment": <number from -1.0 to 1.0 or null>,
+  "confidence": <number from 0.0 to 1.0>,
+  "explanation": "<brief explanation>"
 }}
 
 Firm: {FUND_NAME}
