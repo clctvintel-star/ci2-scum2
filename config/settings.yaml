@@ -8,7 +8,7 @@ subreddits:
   - finance
 
 collection:
-  max_serpapi_pages: 2
+  max_serpapi_pages: 10
   serpapi_num: 100
   depth_cap: 3
   window_days: 60
@@ -22,7 +22,7 @@ scoring:
   retry_limit: 3
   request_timeout: 20
   min_relevance_for_scoring: 0.25
-  uncertain_keep_threshold: 0.85
+  uncertain_keep_threshold: 0.92
 
 models:
   expand:
