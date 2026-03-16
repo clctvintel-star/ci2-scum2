@@ -50,6 +50,13 @@ def read_text(path: Path) -> str:
     return Path(path).read_text(encoding="utf-8")
 
 
+def autosave_df(df: pd.DataFrame, outdir: str) -> Path:
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    outfile = Path(outdir) / f"scored_events_{ts}.parquet"
+    df.to_parquet(outfile, index=False)
+    return outfile
+
+
 def scum_score(sentiment: Optional[float], confidence: Optional[float]) -> Optional[float]:
     if sentiment is None or confidence is None:
         return None
@@ -59,11 +66,14 @@ def scum_score(sentiment: Optional[float], confidence: Optional[float]) -> Optio
         return None
 
 
-def autosave_df(df: pd.DataFrame, outdir: str) -> Path:
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    outfile = Path(outdir) / f"scored_events_{ts}.parquet"
-    df.to_parquet(outfile, index=False)
-    return outfile
+def clamp_float(value: Optional[float], min_val: float, max_val: float) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        value = float(value)
+    except Exception:
+        return None
+    return max(min_val, min(max_val, value))
 
 
 # --------------------------------------------------
@@ -93,6 +103,7 @@ def parse_relevance_response(text: Any) -> Tuple[Optional[str], Optional[float],
     if m:
         reason = m.group(1).strip()
 
+    confidence = clamp_float(confidence, 0.0, 1.0)
     return decision, confidence, reason
 
 
@@ -105,32 +116,31 @@ def strip_code_fences(text: str) -> str:
 
 def coerce_incomplete_json(text: str) -> Optional[Dict[str, Any]]:
     """
-    Attempts lightweight repair only when the model response looks like a truncated
-    JSON object with the expected keys. We keep this conservative to avoid inventing content.
+    Conservative repair for truncated JSON like:
+    {"sentiment": 0.2, "confidence": 0.7, "explanation": "..."
     """
-    if not text or "sentiment" not in text:
+    if not isinstance(text, str):
         return None
 
-    # Try to recover sentiment if only a partial object is present
+    if "sentiment" not in text:
+        return None
+
     sent_match = re.search(r'"sentiment"\s*:\s*(null|-?\d+(?:\.\d+)?)', text)
     conf_match = re.search(r'"confidence"\s*:\s*(null|\d+(?:\.\d+)?)', text)
-    expl_match = re.search(r'"explanation"\s*:\s*"([^"]*)"?', text)
+    expl_match = re.search(r'"explanation"\s*:\s*"([^"]*)', text)
+
+    if not sent_match or not conf_match:
+        return None
 
     payload: Dict[str, Any] = {}
 
-    if sent_match:
-        s = sent_match.group(1)
-        payload["sentiment"] = None if s == "null" else float(s)
-    else:
-        return None
+    s = sent_match.group(1)
+    payload["sentiment"] = None if s == "null" else float(s)
 
-    if conf_match:
-        c = conf_match.group(1)
-        payload["confidence"] = None if c == "null" else float(c)
-    else:
-        return None
+    c = conf_match.group(1)
+    payload["confidence"] = None if c == "null" else float(c)
 
-    payload["explanation"] = expl_match.group(1) if expl_match else None
+    payload["explanation"] = expl_match.group(1).strip() if expl_match else None
     return payload
 
 
@@ -142,7 +152,7 @@ def extract_json_payload(text: Any) -> Optional[Dict[str, Any]]:
     if not text:
         return None
 
-    # First try full-text parse
+    # Try full response
     try:
         payload = json.loads(text)
         if isinstance(payload, dict):
@@ -150,10 +160,11 @@ def extract_json_payload(text: Any) -> Optional[Dict[str, Any]]:
     except Exception:
         pass
 
-    # Then try first {...} block
+    # Try first JSON object
     m = re.search(r"\{.*\}", text, flags=re.DOTALL)
     if m:
         block = m.group(0)
+
         try:
             payload = json.loads(block)
             if isinstance(payload, dict):
@@ -169,7 +180,6 @@ def extract_json_payload(text: Any) -> Optional[Dict[str, Any]]:
         except Exception:
             pass
 
-    # Finally try conservative repair
     repaired = coerce_incomplete_json(text)
     if isinstance(repaired, dict):
         return repaired
@@ -198,6 +208,13 @@ def parse_sentiment_response(text: Any) -> Tuple[Optional[float], Optional[float
     except Exception:
         confidence = None
 
+    sentiment = clamp_float(sentiment, -1.0, 1.0)
+    confidence = clamp_float(confidence, 0.0, 1.0)
+
+    # Normalize null / zero semantics
+    if sentiment is None:
+        confidence = 0.0 if confidence is None else confidence
+
     if isinstance(explanation, str):
         explanation = explanation.strip()
     else:
@@ -221,14 +238,19 @@ def should_trigger_solomon(
 ) -> bool:
     if is_missing_score(a_s, a_c) or is_missing_score(b_s, b_c):
         return True
+
     if a_s == 0 and b_s == 0 and a_c == 0 and b_c == 0:
         return True
+
     if a_s * b_s < 0:
         return True
+
     if a_scum is None or b_scum is None:
         return True
+
     if abs(a_scum - b_scum) > thresh:
         return True
+
     return False
 
 
@@ -252,8 +274,8 @@ def call_anthropic(
     model_name: str,
     prompt: str,
     timeout_seconds: int = 20,
-    max_tokens: int = 800,
-    temperature: float = 0.2,
+    max_tokens: int = 300,
+    temperature: float = 0.1,
     retry_limit: int = 3,
 ) -> str:
     last_err = None
@@ -264,7 +286,7 @@ def call_anthropic(
                 model=model_name,
                 max_tokens=max_tokens,
                 temperature=temperature,
-                system="Return only the requested format. Output must be complete and valid.",
+                system="Return only the requested format. Output must be complete, valid, and final.",
                 messages=[{"role": "user", "content": prompt}],
                 timeout=timeout_seconds,
             )
@@ -282,8 +304,8 @@ def call_openai(
     model_name: str,
     prompt: str,
     timeout_seconds: int = 20,
-    max_tokens: int = 800,
-    temperature: float = 0.2,
+    max_tokens: int = 300,
+    temperature: float = 0.1,
     retry_limit: int = 3,
 ) -> str:
     last_err = None
@@ -297,7 +319,7 @@ def call_openai(
                 messages=[
                     {
                         "role": "system",
-                        "content": "Return only the requested format. Output must be complete and valid."
+                        "content": "Return only the requested format. Output must be complete, valid, and final.",
                     },
                     {"role": "user", "content": prompt},
                 ],
@@ -317,7 +339,7 @@ def call_gemini(
     model_name: str,
     prompt: str,
     timeout_seconds: int = 20,
-    max_output_tokens: int = 400,
+    max_output_tokens: int = 220,
     temperature: float = 0.1,
     retry_limit: int = 3,
 ) -> str:
@@ -353,8 +375,8 @@ def call_model(
     openai_client,
     gemini_client,
     timeout_seconds: int = 20,
-    max_tokens: int = 800,
-    temperature: float = 0.2,
+    max_tokens: int = 300,
+    temperature: float = 0.1,
     retry_limit: int = 3,
 ) -> str:
     if model_name.startswith("claude"):
@@ -385,12 +407,61 @@ def call_model(
             model_name=model_name,
             prompt=prompt,
             timeout_seconds=timeout_seconds,
-            max_output_tokens=max(300, max_tokens),
+            max_output_tokens=max_tokens,
             temperature=temperature,
             retry_limit=retry_limit,
         )
 
     raise ValueError(f"Unsupported model family: {model_name}")
+
+
+def call_and_parse_sentiment(
+    model_name: str,
+    prompt: str,
+    anthropic_client,
+    openai_client,
+    gemini_client,
+    timeout_seconds: int,
+    max_tokens: int,
+    temperature: float,
+    transport_retry_limit: int,
+    semantic_retry_limit: int = 2,
+) -> Tuple[Optional[float], Optional[float], Optional[str], str]:
+    """
+    Makes up to semantic_retry_limit attempts to get parseable JSON.
+    Transport retries happen inside call_model.
+    """
+    last_raw = ""
+
+    for attempt in range(semantic_retry_limit):
+        effective_prompt = prompt
+        if attempt > 0:
+            effective_prompt = (
+                prompt
+                + "\n\nIMPORTANT: Your previous output was invalid or incomplete. "
+                  "Return one complete valid JSON object only with keys "
+                  '"sentiment", "confidence", and "explanation". '
+                  "No markdown fences. No extra text."
+            )
+
+        raw = call_model(
+            model_name=model_name,
+            prompt=effective_prompt,
+            anthropic_client=anthropic_client,
+            openai_client=openai_client,
+            gemini_client=gemini_client,
+            timeout_seconds=timeout_seconds,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            retry_limit=transport_retry_limit,
+        )
+        last_raw = raw
+
+        sentiment, confidence, explanation = parse_sentiment_response(raw)
+        if confidence is not None:
+            return sentiment, confidence, explanation, raw
+
+    return None, None, None, last_raw
 
 
 # --------------------------------------------------
@@ -411,25 +482,27 @@ def build_format_payload(
     candidate_source = row.get("candidate_source", "") or ""
     firm_name = row.get("canonical_name", "") or ""
 
-    return SafeDict({
-        "FIRM_NAME": firm_name,
-        "FUND_NAME": firm_name,
-        "MATCHED_ALIASES": matched_aliases,
-        "CANDIDATE_SOURCE": candidate_source,
-        "THREAD_TITLE": thread_title,
-        "THREAD_TEXT": thread_text,
-        "THREAD_POST": thread_text,
-        "PARENT_TEXT": "",
-        "EVENT_TEXT": event_text,
-        "MODEL_A_SENTIMENT": "" if model_a_sentiment is None else model_a_sentiment,
-        "MODEL_A_CONFIDENCE": "" if model_a_confidence is None else model_a_confidence,
-        "MODEL_B_SENTIMENT": "" if model_b_sentiment is None else model_b_sentiment,
-        "MODEL_B_CONFIDENCE": "" if model_b_confidence is None else model_b_confidence,
-        # backwards-compat placeholders
-        "title": thread_title,
-        "post": f"Thread context:\n{thread_text}\n\nEvent text:\n{event_text}",
-        "comments": "",
-    })
+    return SafeDict(
+        {
+            "FIRM_NAME": firm_name,
+            "FUND_NAME": firm_name,
+            "MATCHED_ALIASES": matched_aliases,
+            "CANDIDATE_SOURCE": candidate_source,
+            "THREAD_TITLE": thread_title,
+            "THREAD_TEXT": thread_text,
+            "THREAD_POST": thread_text,
+            "PARENT_TEXT": "",
+            "EVENT_TEXT": event_text,
+            "MODEL_A_SENTIMENT": "" if model_a_sentiment is None else model_a_sentiment,
+            "MODEL_A_CONFIDENCE": "" if model_a_confidence is None else model_a_confidence,
+            "MODEL_B_SENTIMENT": "" if model_b_sentiment is None else model_b_sentiment,
+            "MODEL_B_CONFIDENCE": "" if model_b_confidence is None else model_b_confidence,
+            # backward-compat placeholders
+            "title": thread_title,
+            "post": f"Thread context:\n{thread_text}\n\nEvent text:\n{event_text}",
+            "comments": "",
+        }
+    )
 
 
 # --------------------------------------------------
@@ -461,7 +534,7 @@ def main():
     request_timeout = settings["scoring"]["request_timeout"]
     autosave_every = settings["scoring"]["autosave_every_n_rows"]
     disagree_threshold = settings["scoring"]["disagree_threshold"]
-    uncertain_keep_threshold = settings["scoring"].get("uncertain_keep_threshold", 0.85)
+    uncertain_keep_threshold = settings["scoring"].get("uncertain_keep_threshold", 0.92)
 
     latest_event_file = latest_parquet(paths["event_firm_dir"])
     latest_thread_file = latest_parquet(paths["thread_firm_dir"])
@@ -490,6 +563,7 @@ def main():
         "relevance_decision",
         "relevance_confidence",
         "relevance_reason",
+        "effective_relevance_decision",
         "uncertain_adjudication_decision",
         "uncertain_adjudication_confidence",
         "uncertain_adjudication_reason",
@@ -515,9 +589,6 @@ def main():
     rows_since_save = 0
 
     for idx, row in scored_df.iterrows():
-        # ------------------------------------------
-        # 1) initial relevance filter
-        # ------------------------------------------
         relevance_payload = build_format_payload(row)
         relevance_prompt = relevance_prompt_template.format_map(relevance_payload)
 
@@ -528,8 +599,8 @@ def main():
             openai_client=openai_client,
             gemini_client=gemini_client,
             timeout_seconds=request_timeout,
-            max_tokens=250,
-            temperature=0.1,
+            max_tokens=160,
+            temperature=0.0,
             retry_limit=retry_limit,
         )
 
@@ -539,10 +610,11 @@ def main():
         scored_df.at[idx, "relevance_confidence"] = rel_conf
         scored_df.at[idx, "relevance_reason"] = rel_reason
 
-        # ------------------------------------------
-        # 2) handle DROP immediately
-        # ------------------------------------------
+        effective_rel = rel_decision
+
+        # hard DROP
         if rel_decision == "DROP":
+            scored_df.at[idx, "effective_relevance_decision"] = "DROP"
             print(f"DROP: {row['event_id']} / {row['canonical_name']}")
             rows_since_save += 1
 
@@ -553,9 +625,7 @@ def main():
 
             continue
 
-        # ------------------------------------------
-        # 3) adjudicate UNCERTAIN exactly once
-        # ------------------------------------------
+        # adjudicate uncertain exactly once
         if rel_decision == "UNCERTAIN":
             uncertain_payload = build_format_payload(row)
             uncertain_prompt = uncertain_prompt_template.format_map(uncertain_payload)
@@ -567,8 +637,8 @@ def main():
                 openai_client=openai_client,
                 gemini_client=gemini_client,
                 timeout_seconds=request_timeout,
-                max_tokens=300,
-                temperature=0.1,
+                max_tokens=180,
+                temperature=0.0,
                 retry_limit=retry_limit,
             )
 
@@ -578,7 +648,11 @@ def main():
             scored_df.at[idx, "uncertain_adjudication_confidence"] = u_conf
             scored_df.at[idx, "uncertain_adjudication_reason"] = u_reason
 
-            if not (u_decision == "KEEP" and u_conf is not None and u_conf >= uncertain_keep_threshold):
+            if u_decision == "KEEP" and u_conf is not None and u_conf >= uncertain_keep_threshold:
+                effective_rel = "KEEP"
+            else:
+                effective_rel = "DROP"
+                scored_df.at[idx, "effective_relevance_decision"] = "DROP"
                 print(
                     f"FLUSH_UNCERTAIN: {row['event_id']} / {row['canonical_name']} | "
                     f"initial=UNCERTAIN | adjudicated={u_decision} @ {u_conf}"
@@ -592,45 +666,44 @@ def main():
 
                 continue
 
-        # ------------------------------------------
-        # 4) primary scoring
-        # ------------------------------------------
+        scored_df.at[idx, "effective_relevance_decision"] = effective_rel
+
+        # primary scoring
         primary_payload = build_format_payload(row)
         primary_prompt = primary_prompt_template.format_map(primary_payload)
 
-        a_text = call_model(
+        a_s, a_c, _a_reason, a_raw = call_and_parse_sentiment(
             model_name=primary_a_model,
             prompt=primary_prompt,
             anthropic_client=anthropic_client,
             openai_client=openai_client,
             gemini_client=gemini_client,
             timeout_seconds=request_timeout,
-            max_tokens=350,
+            max_tokens=220,
             temperature=0.1,
-            retry_limit=retry_limit,
+            transport_retry_limit=retry_limit,
+            semantic_retry_limit=2,
         )
-        a_s, a_c, _ = parse_sentiment_response(a_text)
         a_scum = scum_score(a_s, a_c)
 
-        b_text = call_model(
+        b_s, b_c, _b_reason, b_raw = call_and_parse_sentiment(
             model_name=primary_b_model,
             prompt=primary_prompt,
             anthropic_client=anthropic_client,
             openai_client=openai_client,
             gemini_client=gemini_client,
             timeout_seconds=request_timeout,
-            max_tokens=350,
+            max_tokens=220,
             temperature=0.1,
-            retry_limit=retry_limit,
+            transport_retry_limit=retry_limit,
+            semantic_retry_limit=2,
         )
+        b_scum = scum_score(b_s, b_c)
 
         if args.debug_primary_b:
             print("\n--- PRIMARY_B RAW OUTPUT ---")
-            print(b_text)
+            print(b_raw)
             print("--- END PRIMARY_B RAW OUTPUT ---\n")
-
-        b_s, b_c, _ = parse_sentiment_response(b_text)
-        b_scum = scum_score(b_s, b_c)
 
         scored_df.at[idx, "primary_a_sentiment"] = a_s
         scored_df.at[idx, "primary_a_confidence"] = a_c
@@ -640,9 +713,6 @@ def main():
         scored_df.at[idx, "primary_b_confidence"] = b_c
         scored_df.at[idx, "primary_b_scum"] = b_scum
 
-        # ------------------------------------------
-        # 5) solomon if needed
-        # ------------------------------------------
         solomon = should_trigger_solomon(a_s, a_c, a_scum, b_s, b_c, b_scum, disagree_threshold)
         scored_df.at[idx, "solomon_triggered"] = solomon
 
@@ -660,18 +730,18 @@ def main():
             )
             tie_prompt = tiebreaker_prompt_template.format_map(tie_payload)
 
-            t_text = call_model(
+            t_s, t_c, t_reason, _t_raw = call_and_parse_sentiment(
                 model_name=tiebreaker_model,
                 prompt=tie_prompt,
                 anthropic_client=anthropic_client,
                 openai_client=openai_client,
                 gemini_client=gemini_client,
                 timeout_seconds=request_timeout,
-                max_tokens=500,
-                temperature=0.1,
-                retry_limit=retry_limit,
+                max_tokens=260,
+                temperature=0.0,
+                transport_retry_limit=retry_limit,
+                semantic_retry_limit=2,
             )
-            t_s, t_c, t_reason = parse_sentiment_response(t_text)
             t_scum = scum_score(t_s, t_c)
 
             scored_df.at[idx, "tiebreaker_sentiment"] = t_s
@@ -679,9 +749,22 @@ def main():
             scored_df.at[idx, "tiebreaker_scum"] = t_scum
             scored_df.at[idx, "tiebreaker_reason"] = t_reason
 
-            final_s = t_s
-            final_c = t_c
-            final_sc = t_scum
+            if not is_missing_score(t_s, t_c):
+                final_s = t_s
+                final_c = t_c
+                final_sc = t_scum
+            elif not is_missing_score(a_s, a_c) and is_missing_score(b_s, b_c):
+                final_s = a_s
+                final_c = a_c
+                final_sc = a_scum
+            elif not is_missing_score(b_s, b_c) and is_missing_score(a_s, a_c):
+                final_s = b_s
+                final_c = b_c
+                final_sc = b_scum
+            else:
+                final_s = None
+                final_c = None
+                final_sc = None
         else:
             if not is_missing_score(a_s, a_c) and not is_missing_score(b_s, b_c):
                 final_s = round((a_s + b_s) / 2, 4)
@@ -702,7 +785,7 @@ def main():
 
         print(
             f"{row['event_id']} | {row['canonical_name']} | "
-            f"rel={rel_decision} | A={a_scum} | B={b_scum} | "
+            f"rel={effective_rel} | A={a_scum} | B={b_scum} | "
             f"solomon={solomon} | final={final_sc}"
         )
 
@@ -714,23 +797,33 @@ def main():
 
     outfile = autosave_df(scored_df, paths["scored_events_dir"])
 
+    initial_keep = int((scored_df["relevance_decision"] == "KEEP").sum())
+    initial_uncertain = int((scored_df["relevance_decision"] == "UNCERTAIN").sum())
+
+    rescued_uncertain = int(
+        (
+            (scored_df["uncertain_adjudication_decision"] == "KEEP")
+            & (
+                pd.to_numeric(
+                    scored_df["uncertain_adjudication_confidence"],
+                    errors="coerce",
+                ) >= uncertain_keep_threshold
+            )
+        ).sum()
+    )
+
+    final_scored = int(scored_df["final_scum"].notna().sum())
+    solomon_count = int(scored_df["solomon_triggered"].astype("boolean").fillna(False).sum())
+
     print("\nSaved:")
     print(outfile)
     print("\nCounts:")
     print("Rows scored:", len(scored_df))
-    print("Initial KEEP rows:", int((scored_df["relevance_decision"] == "KEEP").sum()))
-    print("Initial UNCERTAIN rows:", int((scored_df["relevance_decision"] == "UNCERTAIN").sum()))
-    print(
-        "Uncertain rescued:",
-        int(
-            (
-                (scored_df["uncertain_adjudication_decision"] == "KEEP")
-                & (pd.to_numeric(scored_df["uncertain_adjudication_confidence"], errors="coerce") >= uncertain_keep_threshold)
-            ).sum()
-        ),
-    )
-    print("Final scored rows:", int(scored_df["final_scum"].notna().sum()))
-    print("Solomon triggered:", int(scored_df["solomon_triggered"].astype("boolean").fillna(False).sum()))
+    print("Initial KEEP rows:", initial_keep)
+    print("Initial UNCERTAIN rows:", initial_uncertain)
+    print("Uncertain rescued:", rescued_uncertain)
+    print("Final scored rows:", final_scored)
+    print("Solomon triggered:", solomon_count)
 
 
 if __name__ == "__main__":
