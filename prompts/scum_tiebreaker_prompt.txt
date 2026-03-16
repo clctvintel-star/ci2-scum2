@@ -38,8 +38,8 @@ Thread title:
 Thread text:
 {THREAD_TEXT}
 
-Event text:
-{EVENT_TEXT}
-
 Parent text:
 {PARENT_TEXT}
+
+Event text:
+{EVENT_TEXT}
