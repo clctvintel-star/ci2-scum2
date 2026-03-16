@@ -1,1 +1,15 @@
-
+pandas
+numpy
+pyarrow
+openpyxl
+python-dotenv
+PyYAML
+praw
+google-search-results
+anthropic
+google-generativeai
+openai
+gspread
+gspread-dataframe
+duckdb
+tqdm
