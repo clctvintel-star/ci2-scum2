@@ -48,11 +48,11 @@ Confidence measures how clearly the event expresses sentiment about "{FUND_NAME}
 
 Return ONLY JSON:
 
-{
+{{
   "sentiment": <float from -1.0 to 1.0 or null>,
   "confidence": <float from 0.0 to 1.0>,
   "explanation": "<one or two sentences>"
-}
+}}
 
 Firm: {FUND_NAME}
 Matched aliases: {MATCHED_ALIASES}
