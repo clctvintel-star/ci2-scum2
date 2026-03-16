@@ -21,7 +21,11 @@ from utils import load_configs, load_env, ensure_dir
 def parse_args():
     parser = argparse.ArgumentParser(description="SCUM2 event-level scorer")
     parser.add_argument("--limit", type=int, default=None, help="Optional row limit for testing")
-    parser.add_argument("--debug-gemini", action="store_true", help="Print raw Gemini outputs")
+    parser.add_argument(
+        "--debug-primary-b",
+        action="store_true",
+        help="Print raw primary_b outputs for debugging",
+    )
     return parser.parse_args()
 
 
@@ -88,17 +92,14 @@ def extract_json_block(text):
     if not text:
         return None
 
-    # Remove markdown fences if present
     text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\s*```$", "", text)
 
-    # First try full text
     try:
         return json.loads(text)
     except Exception:
         pass
 
-    # Then try to pull a JSON object block
     m = re.search(r"\{.*\}", text, flags=re.DOTALL)
     if not m:
         return None
@@ -110,7 +111,6 @@ def extract_json_block(text):
     except Exception:
         pass
 
-    # Loose fallback for single quotes
     try:
         block2 = re.sub(r"(?<!\\)'", '"', block)
         return json.loads(block2)
@@ -159,6 +159,17 @@ def should_trigger_solomon(a_s, a_c, a_scum, b_s, b_c, b_scum, thresh):
         return True
     return False
 
+
+def autosave_df(df, outdir):
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    outfile = Path(outdir) / f"scored_events_{ts}.parquet"
+    df.to_parquet(outfile, index=False)
+    return outfile
+
+
+# --------------------------------------------------
+# clients
+# --------------------------------------------------
 
 def build_clients(env):
     anthropic_client = Anthropic(api_key=env["ANTHROPIC_API_KEY"])
@@ -321,7 +332,13 @@ def call_model(
 # prompt payload
 # --------------------------------------------------
 
-def build_format_payload(row, model_a_sentiment=None, model_a_confidence=None, model_b_sentiment=None, model_b_confidence=None):
+def build_format_payload(
+    row,
+    model_a_sentiment=None,
+    model_a_confidence=None,
+    model_b_sentiment=None,
+    model_b_confidence=None,
+):
     thread_title = row.get("thread_title", "") or ""
     thread_text = row.get("thread_text", "") or ""
     event_text = row.get("event_text", "") or ""
@@ -350,13 +367,6 @@ def build_format_payload(row, model_a_sentiment=None, model_a_confidence=None, m
     })
 
 
-def autosave_df(df, outdir):
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    outfile = Path(outdir) / f"scored_events_{ts}.parquet"
-    df.to_parquet(outfile, index=False)
-    return outfile
-
-
 # --------------------------------------------------
 # main
 # --------------------------------------------------
@@ -372,10 +382,12 @@ def main():
     anthropic_client, openai_client, gemini_client = build_clients(env)
 
     relevance_prompt_template = read_text(Path("prompts/event_firm_relevance_prompt.txt"))
+    uncertain_prompt_template = read_text(Path("prompts/event_firm_uncertain_prompt.txt"))
     primary_prompt_template = read_text(Path("prompts/scum_primary_prompt.txt"))
     tiebreaker_prompt_template = read_text(Path("prompts/scum_tiebreaker_prompt.txt"))
 
     relevance_model = settings["models"]["score"]["relevance_filter"]
+    uncertain_model = settings["models"]["score"]["uncertain_adjudicator"]
     primary_a_model = settings["models"]["score"]["primary_a"]
     primary_b_model = settings["models"]["score"]["primary_b"]
     tiebreaker_model = settings["models"]["score"]["tiebreaker"]
@@ -384,6 +396,7 @@ def main():
     request_timeout = settings["scoring"]["request_timeout"]
     autosave_every = settings["scoring"]["autosave_every_n_rows"]
     disagree_threshold = settings["scoring"]["disagree_threshold"]
+    uncertain_keep_threshold = settings["scoring"].get("uncertain_keep_threshold", 0.85)
 
     latest_event_file = latest_parquet(paths["event_firm_dir"])
     latest_thread_file = latest_parquet(paths["thread_firm_dir"])
@@ -412,12 +425,15 @@ def main():
         "relevance_decision",
         "relevance_confidence",
         "relevance_reason",
-        "haiku_sentiment",
-        "haiku_confidence",
-        "haiku_scum",
-        "gemini_sentiment",
-        "gemini_confidence",
-        "gemini_scum",
+        "uncertain_adjudication_decision",
+        "uncertain_adjudication_confidence",
+        "uncertain_adjudication_reason",
+        "primary_a_sentiment",
+        "primary_a_confidence",
+        "primary_a_scum",
+        "primary_b_sentiment",
+        "primary_b_confidence",
+        "primary_b_scum",
         "tiebreaker_sentiment",
         "tiebreaker_confidence",
         "tiebreaker_scum",
@@ -435,7 +451,7 @@ def main():
 
     for idx, row in scored_df.iterrows():
         # ------------------------------------------
-        # 1) cheap event-level firm relevance filter
+        # 1) initial relevance filter
         # ------------------------------------------
         relevance_payload = build_format_payload(row)
         relevance_prompt = relevance_prompt_template.format_map(relevance_payload)
@@ -458,6 +474,9 @@ def main():
         scored_df.at[idx, "relevance_confidence"] = rel_conf
         scored_df.at[idx, "relevance_reason"] = rel_reason
 
+        # ------------------------------------------
+        # 2) handle DROP immediately
+        # ------------------------------------------
         if rel_decision == "DROP":
             print(f"DROP: {row['event_id']} / {row['canonical_name']}")
             rows_since_save += 1
@@ -470,7 +489,46 @@ def main():
             continue
 
         # ------------------------------------------
-        # 2) primary scoring
+        # 3) adjudicate UNCERTAIN exactly once
+        # ------------------------------------------
+        if rel_decision == "UNCERTAIN":
+            uncertain_payload = build_format_payload(row)
+            uncertain_prompt = uncertain_prompt_template.format_map(uncertain_payload)
+
+            uncertain_text = call_model(
+                model_name=uncertain_model,
+                prompt=uncertain_prompt,
+                anthropic_client=anthropic_client,
+                openai_client=openai_client,
+                gemini_client=gemini_client,
+                timeout_seconds=request_timeout,
+                max_tokens=300,
+                temperature=0.1,
+                retry_limit=retry_limit,
+            )
+
+            u_decision, u_conf, u_reason = parse_relevance_response(uncertain_text)
+
+            scored_df.at[idx, "uncertain_adjudication_decision"] = u_decision
+            scored_df.at[idx, "uncertain_adjudication_confidence"] = u_conf
+            scored_df.at[idx, "uncertain_adjudication_reason"] = u_reason
+
+            if not (u_decision == "KEEP" and u_conf is not None and u_conf >= uncertain_keep_threshold):
+                print(
+                    f"FLUSH_UNCERTAIN: {row['event_id']} / {row['canonical_name']} | "
+                    f"initial=UNCERTAIN | adjudicated={u_decision} @ {u_conf}"
+                )
+                rows_since_save += 1
+
+                if rows_since_save >= autosave_every:
+                    outfile = autosave_df(scored_df, paths["scored_events_dir"])
+                    print(f"AUTOSAVED: {outfile}")
+                    rows_since_save = 0
+
+                continue
+
+        # ------------------------------------------
+        # 4) primary scoring
         # ------------------------------------------
         primary_payload = build_format_payload(row)
         primary_prompt = primary_prompt_template.format_map(primary_payload)
@@ -501,24 +559,24 @@ def main():
             retry_limit=retry_limit,
         )
 
-        if args.debug_gemini:
-            print("\n--- GEMINI RAW OUTPUT ---")
+        if args.debug_primary_b:
+            print("\n--- PRIMARY_B RAW OUTPUT ---")
             print(b_text)
-            print("--- END GEMINI RAW OUTPUT ---\n")
+            print("--- END PRIMARY_B RAW OUTPUT ---\n")
 
         b_s, b_c, _ = parse_sentiment_response(b_text)
         b_scum = scum_score(b_s, b_c)
 
-        scored_df.at[idx, "haiku_sentiment"] = a_s
-        scored_df.at[idx, "haiku_confidence"] = a_c
-        scored_df.at[idx, "haiku_scum"] = a_scum
+        scored_df.at[idx, "primary_a_sentiment"] = a_s
+        scored_df.at[idx, "primary_a_confidence"] = a_c
+        scored_df.at[idx, "primary_a_scum"] = a_scum
 
-        scored_df.at[idx, "gemini_sentiment"] = b_s
-        scored_df.at[idx, "gemini_confidence"] = b_c
-        scored_df.at[idx, "gemini_scum"] = b_scum
+        scored_df.at[idx, "primary_b_sentiment"] = b_s
+        scored_df.at[idx, "primary_b_confidence"] = b_c
+        scored_df.at[idx, "primary_b_scum"] = b_scum
 
         # ------------------------------------------
-        # 3) solomon if needed
+        # 5) solomon if needed
         # ------------------------------------------
         solomon = should_trigger_solomon(a_s, a_c, a_scum, b_s, b_c, b_scum, disagree_threshold)
         scored_df.at[idx, "solomon_triggered"] = solomon
@@ -595,7 +653,18 @@ def main():
     print(outfile)
     print("\nCounts:")
     print("Rows scored:", len(scored_df))
-    print("Relevant rows:", (scored_df["relevance_decision"] != "DROP").sum())
+    print("Initial KEEP rows:", int((scored_df["relevance_decision"] == "KEEP").sum()))
+    print("Initial UNCERTAIN rows:", int((scored_df["relevance_decision"] == "UNCERTAIN").sum()))
+    print(
+        "Uncertain rescued:",
+        int(
+            (
+                (scored_df["uncertain_adjudication_decision"] == "KEEP")
+                & (pd.to_numeric(scored_df["uncertain_adjudication_confidence"], errors="coerce") >= uncertain_keep_threshold)
+            ).sum()
+        ),
+    )
+    print("Final scored rows:", int(scored_df["final_scum"].notna().sum()))
     print("Solomon triggered:", int(scored_df["solomon_triggered"].astype("boolean").fillna(False).sum()))
 
 
