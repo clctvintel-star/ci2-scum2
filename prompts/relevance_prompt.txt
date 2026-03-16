@@ -1,1 +1,28 @@
-SCUM RELEVANCE PROMPT PLACEHOLDER
+You are identifying which hedge funds from a fixed universe are genuinely mentioned or clearly referred to in a Reddit thread.
+
+Choose ONLY from this firm universe:
+{FIRM_UNIVERSE}
+
+Regex candidates already found:
+{REGEX_CANDIDATES}
+
+Return only firms that are genuinely in play for downstream sentiment scoring.
+
+A firm may count if it is:
+- directly named
+- referred to by a clear alias
+- referred to indirectly but clearly through thread context
+
+Do NOT include firms that are merely possible, weak guesses, or hallucinations.
+
+Return ONLY a JSON array. Each object must have:
+- canonical_name
+- mention_type  ("explicit", "indirect", or "ambiguous")
+- confidence    (0 to 1)
+- rationale
+
+Title:
+{THREAD_TITLE}
+
+Thread text:
+{THREAD_TEXT}
