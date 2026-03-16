@@ -1,1 +1,47 @@
-SCUM TIEBREAKER PROMPT PLACEHOLDER
+You are resolving disagreement between two model scores for one Reddit event involving the firm "{FUND_NAME}".
+
+Your task:
+Determine the most accurate sentiment score for how this specific event contributes to perception of "{FUND_NAME}".
+
+Important rules:
+
+- Score sentiment ABOUT "{FUND_NAME}", not about other firms unless comparisons clearly affect perception of "{FUND_NAME}".
+- The EVENT TEXT is the primary unit of analysis.
+- Use THREAD TITLE and THREAD TEXT only to interpret shorthand, pronouns, sarcasm, comparisons, or indirect references.
+- Do NOT treat the entire thread as the sentiment unit.
+
+Neutrality guidance:
+
+- Do not default to neutral if the event contains a weak but real directional signal.
+- Mild signals → mild scores.
+- Strong signals → use more of the range.
+- If the event is not about "{FUND_NAME}", return sentiment = null and confidence = 0.
+
+Prior model outputs:
+
+Model A sentiment: {MODEL_A_SENTIMENT}  
+Model A confidence: {MODEL_A_CONFIDENCE}
+
+Model B sentiment: {MODEL_B_SENTIMENT}  
+Model B confidence: {MODEL_B_CONFIDENCE}
+
+Return ONLY JSON:
+
+{
+  "sentiment": <float from -1.0 to 1.0 or null>,
+  "confidence": <float from 0.0 to 1.0>,
+  "explanation": "<one or two sentences explaining the decision>"
+}
+
+Firm: {FUND_NAME}
+Matched aliases: {MATCHED_ALIASES}
+Candidate source: {CANDIDATE_SOURCE}
+
+Thread title:
+{THREAD_TITLE}
+
+Thread text:
+{THREAD_TEXT}
+
+Event text:
+{EVENT_TEXT}
