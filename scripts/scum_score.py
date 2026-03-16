@@ -183,8 +183,7 @@ def call_openai(client, model_name, prompt, timeout_seconds=20, max_tokens=800, 
             time.sleep(1)
     raise RuntimeError(f"OpenAI failed for {model_name}: {last_err}")
 
-
-def call_gemini(client, model_name, prompt, timeout_seconds=20, max_output_tokens=800, temperature=0.2, retry_limit=3):
+def call_gemini(client, model_name, prompt, timeout_seconds=20, max_output_tokens=200, temperature=0.1, retry_limit=3):
     last_err = None
     for _ in range(retry_limit):
         try:
@@ -194,6 +193,7 @@ def call_gemini(client, model_name, prompt, timeout_seconds=20, max_output_token
                 config={
                     "temperature": temperature,
                     "max_output_tokens": max_output_tokens,
+                    "response_mime_type": "application/json",
                 },
             )
             return resp.text.strip()
