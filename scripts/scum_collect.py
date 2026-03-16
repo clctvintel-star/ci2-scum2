@@ -11,10 +11,6 @@ from serpapi import GoogleSearch
 from utils import load_configs, load_env, ensure_dir
 
 
-# --------------------------------------------------
-# constants
-# --------------------------------------------------
-
 LEDGER_COLUMNS = [
     "url",
     "discovered_for",
@@ -28,10 +24,6 @@ LEDGER_COLUMNS = [
     "error",
 ]
 
-
-# --------------------------------------------------
-# helpers
-# --------------------------------------------------
 
 def parse_args():
     parser = argparse.ArgumentParser(description="SCUM2 Reddit collector")
@@ -56,7 +48,6 @@ def normalize_reddit_url(url):
         return None
 
     path = parsed.path.rstrip("/")
-
     if "/comments/" not in path:
         return None
 
@@ -65,18 +56,17 @@ def normalize_reddit_url(url):
         netloc="www.reddit.com",
         params="",
         query="",
-        fragment=""
+        fragment="",
     )
     return urlunparse(clean).rstrip("/")
 
 
 def build_reddit_client(env):
-    reddit = praw.Reddit(
+    return praw.Reddit(
         client_id=env["REDDIT_CLIENT_ID"],
         client_secret=env["REDDIT_SECRET"],
         user_agent=env["REDDIT_AGENT"],
     )
-    return reddit
 
 
 def read_ledger(ledger_path):
@@ -101,7 +91,7 @@ def upsert_discoveries(ledger_df, discovered_rows):
         return ledger_df
 
     now_utc = datetime.now(timezone.utc).isoformat()
-    discovered_df = pd.DataFrame(discovered_rows)
+    discovered_df = pd.DataFrame(discovered_rows).drop_duplicates(subset=["url"])
 
     if ledger_df.empty:
         discovered_df["last_seen_utc"] = discovered_df["discovered_at_utc"].fillna(now_utc)
@@ -124,13 +114,11 @@ def upsert_discoveries(ledger_df, discovered_rows):
         new_rows["error"] = None
         ledger_df = pd.concat([ledger_df, new_rows[LEDGER_COLUMNS]], ignore_index=True)
 
-    # update last_seen for URLs rediscovered
-    if not discovered_df.empty:
-        seen_map = discovered_df.groupby("url")["discovered_at_utc"].max().to_dict()
-        ledger_df["last_seen_utc"] = ledger_df.apply(
-            lambda row: seen_map.get(row["url"], row["last_seen_utc"]),
-            axis=1
-        )
+    seen_map = discovered_df.groupby("url")["discovered_at_utc"].max().to_dict()
+    ledger_df["last_seen_utc"] = ledger_df.apply(
+        lambda row: seen_map.get(row["url"], row["last_seen_utc"]),
+        axis=1,
+    )
 
     return ledger_df
 
@@ -149,8 +137,8 @@ def search_reddit_urls(query, serpapi_key, max_pages, num):
 
         search = GoogleSearch(params)
         results = search.get_dict()
-
         organic = results.get("organic_results", [])
+
         if not organic:
             break
 
@@ -167,6 +155,8 @@ def search_reddit_urls(query, serpapi_key, max_pages, num):
 def fetch_thread(
     reddit,
     url,
+    discovered_for,
+    discovered_alias,
     depth_cap=3,
     window_days=60,
     score_min=1,
@@ -207,10 +197,8 @@ def fetch_thread(
         }
 
     cutoff_utc = post_created + (window_days * 86400)
-
     rows = []
 
-    # post row
     rows.append({
         "event_id": f"post_{submission.id}",
         "post_id": submission.id,
@@ -227,17 +215,16 @@ def fetch_thread(
         "body": None,
         "url": submission.url,
         "permalink": f"https://www.reddit.com{submission.permalink}",
+        "discovered_for": discovered_for,
+        "discovered_alias": discovered_alias,
     })
 
-    # comment + reply rows
     for comment in submission.comments.list():
         depth = getattr(comment, "depth", None)
         if depth is None:
             continue
-
         if depth > depth_cap:
             continue
-
         if comment.created_utc > cutoff_utc:
             continue
 
@@ -261,6 +248,8 @@ def fetch_thread(
             "body": comment.body,
             "url": submission.url,
             "permalink": f"https://www.reddit.com{comment.permalink}",
+            "discovered_for": discovered_for,
+            "discovered_alias": discovered_alias,
         })
 
     return rows, {
@@ -271,9 +260,16 @@ def fetch_thread(
     }
 
 
-# --------------------------------------------------
-# main
-# --------------------------------------------------
+def flush_rows(rows_buffer, events_dir):
+    if not rows_buffer:
+        return None, 0
+
+    df = pd.DataFrame(rows_buffer).drop_duplicates(subset=["event_id"])
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    outfile = Path(events_dir) / f"scum_events_{ts}.parquet"
+    df.to_parquet(outfile, index=False)
+    return outfile, len(df)
+
 
 def main():
     args = parse_args()
@@ -298,6 +294,7 @@ def main():
     score_min = settings["collection"]["score_min"]
     max_pages = settings["collection"]["max_serpapi_pages"]
     serpapi_num = settings["collection"]["serpapi_num"]
+    autosave_every_n_posts = settings["collection"]["autosave_every_n_posts"]
 
     start_ts = to_timestamp(args.start_date)
     end_ts = to_timestamp(args.end_date)
@@ -308,10 +305,6 @@ def main():
             raise ValueError(f"Fund not found in firms.yaml: {args.fund}")
     else:
         selected_firms = firms["firms"]
-
-    # ---------------------------
-    # discovery
-    # ---------------------------
 
     discovered_rows = []
 
@@ -347,16 +340,14 @@ def main():
     ledger = upsert_discoveries(ledger, discovered_rows)
     write_ledger(ledger, paths["ledger_path"])
 
-    # ---------------------------
-    # collection
-    # ---------------------------
-
-    pending_mask = ledger["status"].fillna("new") != "collected"
-    pending = ledger[pending_mask].copy()
+    pending_statuses = {"new", "error"}
+    pending = ledger[ledger["status"].fillna("new").isin(pending_statuses)].copy()
 
     print(f"\nPending urls to collect: {len(pending)}")
 
-    all_rows = []
+    rows_buffer = []
+    posts_since_flush = 0
+    total_rows_written = 0
 
     for idx, row in pending.iterrows():
         url = row["url"]
@@ -365,6 +356,8 @@ def main():
             rows, meta = fetch_thread(
                 reddit=reddit,
                 url=url,
+                discovered_for=row["discovered_for"],
+                discovered_alias=row["discovered_alias"],
                 depth_cap=depth_cap,
                 window_days=window_days,
                 score_min=score_min,
@@ -380,9 +373,19 @@ def main():
             ledger.at[idx, "error"] = meta["error"]
 
             if rows:
-                all_rows.extend(rows)
+                rows_buffer.extend(rows)
 
+            posts_since_flush += 1
             print(f"{meta['status']}: {url} -> {len(rows)} events")
+
+            if posts_since_flush >= autosave_every_n_posts:
+                outfile, nrows = flush_rows(rows_buffer, paths["events_dir"])
+                if outfile:
+                    total_rows_written += nrows
+                    print(f"AUTOSAVED: {outfile} ({nrows} rows)")
+                rows_buffer = []
+                posts_since_flush = 0
+                write_ledger(ledger, paths["ledger_path"])
 
         except Exception as e:
             ledger.at[idx, "status"] = "error"
@@ -392,24 +395,13 @@ def main():
 
     write_ledger(ledger, paths["ledger_path"])
 
-    # ---------------------------
-    # save parquet
-    # ---------------------------
+    outfile, nrows = flush_rows(rows_buffer, paths["events_dir"])
+    if outfile:
+        total_rows_written += nrows
+        print(f"\nFINAL SAVE: {outfile} ({nrows} rows)")
 
-    if not all_rows:
-        print("\nNo rows collected. Nothing to save.")
-        return
-
-    df = pd.DataFrame(all_rows).drop_duplicates(subset=["event_id"])
-
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M")
-    outfile = Path(paths["events_dir"]) / f"scum_events_{ts}.parquet"
-
-    df.to_parquet(outfile, index=False)
-
-    print("\nSaved:", outfile)
-    print("Rows:", len(df))
-    print("Unique posts:", df["post_id"].nunique())
+    print("\nDone.")
+    print("Total rows written:", total_rows_written)
 
 
 if __name__ == "__main__":
