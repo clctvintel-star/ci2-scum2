@@ -26,7 +26,7 @@ scoring:
 
 models:
   primary_a: claude-haiku-4-5
-  primary_b: gemini-2.5-pro
+  primary_b: gemini-2.5-flash
   tiebreaker: gpt-4o
 
 aggregation:
