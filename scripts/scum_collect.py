@@ -30,6 +30,11 @@ def parse_args():
     parser.add_argument("--fund", type=str, default=None, help="Collect for one canonical fund only")
     parser.add_argument("--start-date", type=str, default=None, help="YYYY-MM-DD")
     parser.add_argument("--end-date", type=str, default=None, help="YYYY-MM-DD")
+    parser.add_argument(
+        "--reset-ledger",
+        action="store_true",
+        help="Delete existing discovery ledger before run",
+    )
     return parser.parse_args()
 
 
@@ -102,12 +107,19 @@ def write_ledger(df, ledger_path):
     df.to_parquet(ledger_path, index=False)
 
 
+def maybe_reset_ledger(ledger_path, reset=False):
+    ledger_path = Path(ledger_path)
+    if reset and ledger_path.exists():
+        ledger_path.unlink()
+        print(f"RESET ledger: {ledger_path}")
+
+
 def upsert_discoveries(ledger_df, discovered_rows):
     if not discovered_rows:
         return ledger_df
 
     now_utc = datetime.now(timezone.utc).isoformat()
-    discovered_df = pd.DataFrame(discovered_rows).drop_duplicates(subset=["url"])
+    discovered_df = pd.DataFrame(discovered_rows).drop_duplicates(subset=["url"]).copy()
 
     if ledger_df.empty:
         discovered_df["last_seen_utc"] = discovered_df["discovered_at_utc"].fillna(now_utc)
@@ -144,7 +156,9 @@ def search_reddit_urls(query, serpapi_key, max_pages, num, allowed_subreddits=No
     seen_urls = set()
 
     for page in range(max_pages):
-        start = page * num
+        # Google pagination is 10-result based even if num=100
+        start = page * 10
+
         params = {
             "engine": "google",
             "q": f"\"{query}\" site:reddit.com",
@@ -158,7 +172,7 @@ def search_reddit_urls(query, serpapi_key, max_pages, num, allowed_subreddits=No
         organic = results.get("organic_results", [])
 
         if not organic:
-            print(f"  page {page + 1}: empty results, stopping")
+            print(f"  page {page + 1}/{max_pages} | organic=0 | stopping")
             break
 
         page_candidate_count = 0
@@ -190,10 +204,6 @@ def search_reddit_urls(query, serpapi_key, max_pages, num, allowed_subreddits=No
             f"new_urls={page_new_unique} | "
             f"running_total={len(urls)}"
         )
-
-        if page_new_unique == 0:
-            print("  no new usable URLs on this page, stopping")
-            break
 
         time.sleep(1)
 
@@ -334,6 +344,7 @@ def main():
     ensure_dir(paths["events_dir"])
     ensure_dir(Path(paths["ledger_path"]).parent)
 
+    maybe_reset_ledger(paths["ledger_path"], reset=args.reset_ledger)
     ledger = read_ledger(paths["ledger_path"])
 
     allowed_subreddits = {s.lower() for s in settings.get("subreddits", [])}
@@ -436,6 +447,8 @@ def main():
             if rows:
                 rows_buffer.extend(rows)
                 print(f"collected: {url} -> {len(rows)} events")
+            else:
+                print(f"{meta['status']}: {url} -> 0 events")
 
             posts_since_flush += 1
             processed += 1
