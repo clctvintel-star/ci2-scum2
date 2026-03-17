@@ -1,907 +1,499 @@
 import argparse
-import json
-import math
-import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from urllib.parse import urlparse, urlunparse
 
 import pandas as pd
-from anthropic import Anthropic
-from google import genai
-from openai import OpenAI
+import praw
+from serpapi import GoogleSearch
 
 from utils import load_configs, load_env, ensure_dir
 
 
-# --------------------------------------------------
-# args
-# --------------------------------------------------
+LEDGER_COLUMNS = [
+    "url",
+    "discovered_for",
+    "discovered_alias",
+    "discovered_at_utc",
+    "last_seen_utc",
+    "post_id",
+    "subreddit",
+    "status",
+    "collected_at_utc",
+    "error",
+]
+
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="SCUM2 event-level scorer")
-    parser.add_argument("--limit", type=int, default=None, help="Optional row limit for testing")
-    parser.add_argument(
-        "--debug-primary-b",
-        action="store_true",
-        help="Print raw primary_b outputs for debugging",
-    )
+    parser = argparse.ArgumentParser(description="SCUM2 Reddit collector")
+    parser.add_argument("--fund", type=str, default=None, help="Collect for one canonical fund only")
+    parser.add_argument("--start-date", type=str, default=None, help="YYYY-MM-DD")
+    parser.add_argument("--end-date", type=str, default=None, help="YYYY-MM-DD")
     return parser.parse_args()
 
 
-# --------------------------------------------------
-# helpers
-# --------------------------------------------------
-
-class SafeDict(dict):
-    def __missing__(self, key):
-        return "{" + key + "}"
-
-
-def latest_parquet(directory: str) -> Path:
-    files = sorted(Path(directory).glob("*.parquet"))
-    if not files:
-        raise FileNotFoundError(f"No parquet files found in {directory}")
-    return files[-1]
-
-
-def read_text(path: Path) -> str:
-    return Path(path).read_text(encoding="utf-8")
-
-
-def autosave_df(df: pd.DataFrame, outdir: str) -> Path:
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    outfile = Path(outdir) / f"scored_events_{ts}.parquet"
-    df.to_parquet(outfile, index=False)
-    return outfile
-
-
-def scum_score(sentiment: Optional[float], confidence: Optional[float]) -> Optional[float]:
-    if sentiment is None or confidence is None:
+def to_timestamp(date_str):
+    if not date_str:
         return None
-    try:
-        return round(float(sentiment) * math.sqrt(float(confidence)), 4)
-    except Exception:
+    return datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp()
+
+
+def normalize_reddit_url(url):
+    if not url:
         return None
 
-
-def clamp_float(value: Optional[float], min_val: float, max_val: float) -> Optional[float]:
-    if value is None:
-        return None
-    try:
-        value = float(value)
-    except Exception:
-        return None
-    return max(min_val, min(max_val, value))
-
-
-def safe_text(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, float) and pd.isna(value):
-        return ""
-    return str(value).strip()
-
-
-# --------------------------------------------------
-# parsing
-# --------------------------------------------------
-
-def parse_relevance_response(text: Any) -> Tuple[Optional[str], Optional[float], Optional[str]]:
-    if not isinstance(text, str):
-        return None, None, None
-
-    decision = None
-    confidence = None
-    reason = None
-
-    m = re.search(r"Decision:\s*(KEEP|DROP|UNCERTAIN)", text, flags=re.IGNORECASE)
-    if m:
-        decision = m.group(1).upper()
-
-    m = re.search(r"Confidence:\s*([0-9]*\.?[0-9]+)", text, flags=re.IGNORECASE)
-    if m:
-        try:
-            confidence = float(m.group(1))
-        except Exception:
-            confidence = None
-
-    m = re.search(r"Reason:\s*(.+)", text, flags=re.IGNORECASE | re.DOTALL)
-    if m:
-        reason = m.group(1).strip()
-
-    confidence = clamp_float(confidence, 0.0, 1.0)
-    return decision, confidence, reason
-
-
-def strip_code_fences(text: str) -> str:
-    text = text.strip()
-    text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"\s*```$", "", text)
-    return text.strip()
-
-
-def coerce_incomplete_json(text: str) -> Optional[Dict[str, Any]]:
-    """
-    Conservative repair for truncated JSON like:
-    {"sentiment": 0.2, "confidence": 0.7, "explanation": "..."
-    """
-    if not isinstance(text, str):
+    parsed = urlparse(url)
+    netloc = (parsed.netloc or "").lower()
+    if "reddit.com" not in netloc:
         return None
 
-    if "sentiment" not in text:
+    path = (parsed.path or "").rstrip("/")
+    if "/comments/" not in path:
         return None
 
-    sent_match = re.search(r'"sentiment"\s*:\s*(null|-?\d+(?:\.\d+)?)', text)
-    conf_match = re.search(r'"confidence"\s*:\s*(null|\d+(?:\.\d+)?)', text)
-    expl_match = re.search(r'"explanation"\s*:\s*"([^"]*)', text)
-
-    if not sent_match or not conf_match:
-        return None
-
-    payload: Dict[str, Any] = {}
-
-    s = sent_match.group(1)
-    payload["sentiment"] = None if s == "null" else float(s)
-
-    c = conf_match.group(1)
-    payload["confidence"] = None if c == "null" else float(c)
-
-    payload["explanation"] = expl_match.group(1).strip() if expl_match else None
-    return payload
+    clean = parsed._replace(
+        scheme="https",
+        netloc="www.reddit.com",
+        params="",
+        query="",
+        fragment="",
+    )
+    return urlunparse(clean).rstrip("/")
 
 
-def extract_json_payload(text: Any) -> Optional[Dict[str, Any]]:
-    if not isinstance(text, str):
-        return None
-
-    text = strip_code_fences(text)
-    if not text:
+def extract_subreddit_from_url(url):
+    if not url:
         return None
 
     try:
-        payload = json.loads(text)
-        if isinstance(payload, dict):
-            return payload
+        parsed = urlparse(url)
+        parts = [p for p in parsed.path.split("/") if p]
+        if len(parts) >= 2 and parts[0].lower() == "r":
+            return parts[1]
     except Exception:
-        pass
-
-    m = re.search(r"\{.*\}", text, flags=re.DOTALL)
-    if m:
-        block = m.group(0)
-
-        try:
-            payload = json.loads(block)
-            if isinstance(payload, dict):
-                return payload
-        except Exception:
-            pass
-
-        try:
-            block2 = re.sub(r"(?<!\\)'", '"', block)
-            payload = json.loads(block2)
-            if isinstance(payload, dict):
-                return payload
-        except Exception:
-            pass
-
-    repaired = coerce_incomplete_json(text)
-    if isinstance(repaired, dict):
-        return repaired
+        return None
 
     return None
 
 
-def parse_sentiment_response(text: Any) -> Tuple[Optional[float], Optional[float], Optional[str]]:
-    payload = extract_json_payload(text)
-    if not payload:
-        return None, None, None
-
-    sentiment = payload.get("sentiment")
-    confidence = payload.get("confidence")
-    explanation = payload.get("explanation") or payload.get("reason") or payload.get("rationale")
-
-    try:
-        if sentiment is not None:
-            sentiment = float(sentiment)
-    except Exception:
-        sentiment = None
-
-    try:
-        if confidence is not None:
-            confidence = float(confidence)
-    except Exception:
-        confidence = None
-
-    sentiment = clamp_float(sentiment, -1.0, 1.0)
-    confidence = clamp_float(confidence, 0.0, 1.0)
-
-    if sentiment is None:
-        confidence = 0.0 if confidence is None else confidence
-
-    if isinstance(explanation, str):
-        explanation = explanation.strip()
-    else:
-        explanation = None
-
-    return sentiment, confidence, explanation
-
-
-def is_missing_score(sentiment: Optional[float], confidence: Optional[float]) -> bool:
-    return sentiment is None or confidence is None
-
-
-def should_trigger_solomon(
-    a_s: Optional[float],
-    a_c: Optional[float],
-    a_scum: Optional[float],
-    b_s: Optional[float],
-    b_c: Optional[float],
-    b_scum: Optional[float],
-    thresh: float,
-) -> bool:
-    if is_missing_score(a_s, a_c) or is_missing_score(b_s, b_c):
-        return True
-
-    if a_s == 0 and b_s == 0 and a_c == 0 and b_c == 0:
-        return True
-
-    if a_s * b_s < 0:
-        return True
-
-    if a_scum is None or b_scum is None:
-        return True
-
-    if abs(a_scum - b_scum) > thresh:
-        return True
-
-    return False
-
-
-# --------------------------------------------------
-# parent context
-# --------------------------------------------------
-
-def normalize_reddit_id(raw_id: Any) -> str:
-    raw_id = safe_text(raw_id)
-    if not raw_id:
-        return ""
-    return re.sub(r"^(t1_|t3_)", "", raw_id)
-
-
-def build_parent_lookup(events_df: pd.DataFrame) -> Tuple[Dict[str, str], Dict[str, str]]:
-    """
-    Returns:
-      post_text_map[post_id] = post event_text
-      comment_text_map[comment_id] = comment event_text
-    """
-    post_text_map: Dict[str, str] = {}
-    comment_text_map: Dict[str, str] = {}
-
-    for _, row in events_df.iterrows():
-        event_text = safe_text(row.get("event_text"))
-        post_id = normalize_reddit_id(row.get("post_id"))
-        comment_id = normalize_reddit_id(row.get("comment_id"))
-        row_type = safe_text(row.get("type")).lower()
-
-        if row_type == "post":
-            if post_id and event_text and post_id not in post_text_map:
-                post_text_map[post_id] = event_text
-
-        if comment_id and event_text and comment_id not in comment_text_map:
-            comment_text_map[comment_id] = event_text
-
-    return post_text_map, comment_text_map
-
-
-def get_parent_text(
-    row: pd.Series,
-    post_text_map: Dict[str, str],
-    comment_text_map: Dict[str, str],
-) -> str:
-    parent_id = safe_text(row.get("parent_id"))
-    if not parent_id:
-        return ""
-
-    if parent_id.startswith("t1_"):
-        parent_comment_id = normalize_reddit_id(parent_id)
-        return comment_text_map.get(parent_comment_id, "")
-
-    if parent_id.startswith("t3_"):
-        parent_post_id = normalize_reddit_id(parent_id)
-        return post_text_map.get(parent_post_id, "")
-
-    # fallback if raw parent_id has no prefix
-    parent_norm = normalize_reddit_id(parent_id)
-    if parent_norm in comment_text_map:
-        return comment_text_map[parent_norm]
-    if parent_norm in post_text_map:
-        return post_text_map[parent_norm]
-
-    return ""
-
-
-# --------------------------------------------------
-# clients
-# --------------------------------------------------
-
-def build_clients(env):
-    anthropic_client = Anthropic(api_key=env["ANTHROPIC_API_KEY"])
-    openai_client = OpenAI(api_key=env["OPENAI_API_KEY"])
-    gemini_client = genai.Client(api_key=env["GOOGLE_API_KEY"])
-    return anthropic_client, openai_client, gemini_client
-
-
-# --------------------------------------------------
-# model calls
-# --------------------------------------------------
-
-def call_anthropic(
-    client,
-    model_name: str,
-    prompt: str,
-    timeout_seconds: int = 20,
-    max_tokens: int = 300,
-    temperature: float = 0.1,
-    retry_limit: int = 3,
-) -> str:
-    last_err = None
-
-    for _ in range(retry_limit):
-        try:
-            resp = client.messages.create(
-                model=model_name,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                system="Return only the requested format. Output must be complete, valid, and final.",
-                messages=[{"role": "user", "content": prompt}],
-                timeout=timeout_seconds,
-            )
-            return resp.content[0].text.strip()
-        except Exception as e:
-            last_err = e
-            print(f"Anthropic error ({model_name}), retrying: {e}")
-            time.sleep(1)
-
-    raise RuntimeError(f"Anthropic failed for {model_name}: {last_err}")
-
-
-def call_openai(
-    client,
-    model_name: str,
-    prompt: str,
-    timeout_seconds: int = 20,
-    max_tokens: int = 300,
-    temperature: float = 0.1,
-    retry_limit: int = 3,
-) -> str:
-    last_err = None
-
-    for _ in range(retry_limit):
-        try:
-            resp = client.chat.completions.create(
-                model=model_name,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "Return only the requested format. Output must be complete, valid, and final.",
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                timeout=timeout_seconds,
-            )
-            return (resp.choices[0].message.content or "").strip()
-        except Exception as e:
-            last_err = e
-            print(f"OpenAI error ({model_name}), retrying: {e}")
-            time.sleep(1)
-
-    raise RuntimeError(f"OpenAI failed for {model_name}: {last_err}")
-
-
-def call_gemini(
-    client,
-    model_name: str,
-    prompt: str,
-    timeout_seconds: int = 20,
-    max_output_tokens: int = 220,
-    temperature: float = 0.1,
-    retry_limit: int = 3,
-) -> str:
-    last_err = None
-
-    for _ in range(retry_limit):
-        try:
-            resp = client.models.generate_content(
-                model=model_name,
-                contents=prompt,
-                config={
-                    "temperature": temperature,
-                    "max_output_tokens": max_output_tokens,
-                    "response_mime_type": "application/json",
-                },
-            )
-            text = getattr(resp, "text", None)
-            if text:
-                return text.strip()
-            return str(resp)
-        except Exception as e:
-            last_err = e
-            print(f"Gemini error ({model_name}), retrying: {e}")
-            time.sleep(1)
-
-    raise RuntimeError(f"Gemini failed for {model_name}: {last_err}")
-
-
-def call_model(
-    model_name: str,
-    prompt: str,
-    anthropic_client,
-    openai_client,
-    gemini_client,
-    timeout_seconds: int = 20,
-    max_tokens: int = 300,
-    temperature: float = 0.1,
-    retry_limit: int = 3,
-) -> str:
-    if model_name.startswith("claude"):
-        return call_anthropic(
-            client=anthropic_client,
-            model_name=model_name,
-            prompt=prompt,
-            timeout_seconds=timeout_seconds,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            retry_limit=retry_limit,
-        )
-
-    if model_name.startswith("gpt"):
-        return call_openai(
-            client=openai_client,
-            model_name=model_name,
-            prompt=prompt,
-            timeout_seconds=timeout_seconds,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            retry_limit=retry_limit,
-        )
-
-    if model_name.startswith("gemini"):
-        return call_gemini(
-            client=gemini_client,
-            model_name=model_name,
-            prompt=prompt,
-            timeout_seconds=timeout_seconds,
-            max_output_tokens=max_tokens,
-            temperature=temperature,
-            retry_limit=retry_limit,
-        )
-
-    raise ValueError(f"Unsupported model family: {model_name}")
-
-
-def call_and_parse_sentiment(
-    model_name: str,
-    prompt: str,
-    anthropic_client,
-    openai_client,
-    gemini_client,
-    timeout_seconds: int,
-    max_tokens: int,
-    temperature: float,
-    transport_retry_limit: int,
-    semantic_retry_limit: int = 2,
-) -> Tuple[Optional[float], Optional[float], Optional[str], str]:
-    """
-    Makes up to semantic_retry_limit attempts to get parseable JSON.
-    Transport retries happen inside call_model.
-    """
-    last_raw = ""
-
-    for attempt in range(semantic_retry_limit):
-        effective_prompt = prompt
-        if attempt > 0:
-            effective_prompt = (
-                prompt
-                + "\n\nIMPORTANT: Your previous output was invalid or incomplete. "
-                  "Return one complete valid JSON object only with keys "
-                  '"sentiment", "confidence", and "explanation". '
-                  "No markdown fences. No extra text."
-            )
-
-        raw = call_model(
-            model_name=model_name,
-            prompt=effective_prompt,
-            anthropic_client=anthropic_client,
-            openai_client=openai_client,
-            gemini_client=gemini_client,
-            timeout_seconds=timeout_seconds,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            retry_limit=transport_retry_limit,
-        )
-        last_raw = raw
-
-        sentiment, confidence, explanation = parse_sentiment_response(raw)
-        if confidence is not None:
-            return sentiment, confidence, explanation, raw
-
-    return None, None, None, last_raw
-
-
-# --------------------------------------------------
-# prompt payload
-# --------------------------------------------------
-
-def build_format_payload(
-    row,
-    parent_text: str = "",
-    model_a_sentiment=None,
-    model_a_confidence=None,
-    model_b_sentiment=None,
-    model_b_confidence=None,
-):
-    thread_title = safe_text(row.get("thread_title"))
-    thread_text = safe_text(row.get("thread_text"))
-    event_text = safe_text(row.get("event_text"))
-    matched_aliases = safe_text(row.get("matched_aliases"))
-    candidate_source = safe_text(row.get("candidate_source"))
-    firm_name = safe_text(row.get("canonical_name"))
-    parent_text = safe_text(parent_text)
-
-    return SafeDict(
-        {
-            "FIRM_NAME": firm_name,
-            "FUND_NAME": firm_name,
-            "MATCHED_ALIASES": matched_aliases,
-            "CANDIDATE_SOURCE": candidate_source,
-            "THREAD_TITLE": thread_title,
-            "THREAD_TEXT": thread_text,
-            "THREAD_POST": thread_text,
-            "PARENT_TEXT": parent_text,
-            "EVENT_TEXT": event_text,
-            "MODEL_A_SENTIMENT": "" if model_a_sentiment is None else model_a_sentiment,
-            "MODEL_A_CONFIDENCE": "" if model_a_confidence is None else model_a_confidence,
-            "MODEL_B_SENTIMENT": "" if model_b_sentiment is None else model_b_sentiment,
-            "MODEL_B_CONFIDENCE": "" if model_b_confidence is None else model_b_confidence,
-            # backward-compat placeholders
-            "title": thread_title,
-            "post": f"Thread context:\n{thread_text}\n\nParent text:\n{parent_text}\n\nEvent text:\n{event_text}",
-            "comments": "",
-        }
+def build_reddit_client(env):
+    return praw.Reddit(
+        client_id=env["REDDIT_CLIENT_ID"],
+        client_secret=env["REDDIT_SECRET"],
+        user_agent=env["REDDIT_AGENT"],
     )
 
 
-# --------------------------------------------------
-# main
-# --------------------------------------------------
+def read_ledger(ledger_path):
+    ledger_path = Path(ledger_path)
+    if ledger_path.exists():
+        df = pd.read_parquet(ledger_path)
+        for col in LEDGER_COLUMNS:
+            if col not in df.columns:
+                df[col] = None
+        return df[LEDGER_COLUMNS].copy()
+    return pd.DataFrame(columns=LEDGER_COLUMNS)
+
+
+def write_ledger(df, ledger_path):
+    ledger_path = Path(ledger_path)
+    ensure_dir(ledger_path.parent)
+    df.to_parquet(ledger_path, index=False)
+
+
+def upsert_discoveries(ledger_df, discovered_rows):
+    if not discovered_rows:
+        return ledger_df
+
+    now_utc = datetime.now(timezone.utc).isoformat()
+    discovered_df = pd.DataFrame(discovered_rows).drop_duplicates(subset=["url"])
+
+    if ledger_df.empty:
+        discovered_df["last_seen_utc"] = discovered_df["discovered_at_utc"].fillna(now_utc)
+        discovered_df["post_id"] = None
+        discovered_df["subreddit"] = None
+        discovered_df["status"] = "new"
+        discovered_df["collected_at_utc"] = None
+        discovered_df["error"] = None
+        return discovered_df[LEDGER_COLUMNS]
+
+    existing_urls = set(ledger_df["url"].dropna().tolist())
+    new_rows = discovered_df[~discovered_df["url"].isin(existing_urls)].copy()
+
+    if not new_rows.empty:
+        new_rows["last_seen_utc"] = new_rows["discovered_at_utc"].fillna(now_utc)
+        new_rows["post_id"] = None
+        new_rows["subreddit"] = None
+        new_rows["status"] = "new"
+        new_rows["collected_at_utc"] = None
+        new_rows["error"] = None
+        ledger_df = pd.concat([ledger_df, new_rows[LEDGER_COLUMNS]], ignore_index=True)
+
+    seen_map = discovered_df.groupby("url")["discovered_at_utc"].max().to_dict()
+    ledger_df["last_seen_utc"] = ledger_df.apply(
+        lambda row: seen_map.get(row["url"], row["last_seen_utc"]),
+        axis=1,
+    )
+
+    return ledger_df
+
+
+def search_reddit_urls(query, serpapi_key, max_pages, num, allowed_subreddits=None):
+    urls = []
+    seen_urls = set()
+
+    for page in range(max_pages):
+        # Critical fix:
+        # Google/SerpAPI is effectively paging these results in ~10-organic-result chunks,
+        # even when num=100. So stepping by `num` was skipping huge swaths of results.
+        start = page * 10
+
+        params = {
+            "engine": "google",
+            "q": f"\"{query}\" site:reddit.com",
+            "api_key": serpapi_key,
+            "num": num,
+            "start": start,
+        }
+
+        search = GoogleSearch(params)
+        results = search.get_dict()
+        organic = results.get("organic_results", [])
+
+        if not organic:
+            print(f"  page {page + 1}/{max_pages} | organic=0 | stopping")
+            break
+
+        page_candidate_count = 0
+        page_subreddit_filtered = 0
+        page_new_unique = 0
+
+        for r in organic:
+            link = normalize_reddit_url(r.get("link"))
+            if not link:
+                continue
+
+            page_candidate_count += 1
+
+            subreddit = extract_subreddit_from_url(link)
+            if allowed_subreddits and subreddit and subreddit.lower() not in allowed_subreddits:
+                page_subreddit_filtered += 1
+                continue
+
+            if link not in seen_urls:
+                seen_urls.add(link)
+                urls.append(link)
+                page_new_unique += 1
+
+        print(
+            f"  page {page + 1}/{max_pages} | "
+            f"organic={len(organic)} | "
+            f"comment_threads={page_candidate_count} | "
+            f"subreddit_filtered={page_subreddit_filtered} | "
+            f"new_urls={page_new_unique} | "
+            f"running_total={len(urls)}"
+        )
+
+        # Do not stop just because a page had zero new URLs.
+        # Later pages can still have useful results.
+        time.sleep(1)
+
+    return urls
+
+
+def fetch_thread(
+    reddit,
+    url,
+    discovered_for,
+    discovered_alias,
+    depth_cap=3,
+    window_days=60,
+    score_min=1,
+    allowed_subreddits=None,
+    start_ts=None,
+    end_ts=None,
+):
+    submission = reddit.submission(url=url)
+    submission.comments.replace_more(limit=0)
+
+    subreddit_name = submission.subreddit.display_name
+    subreddit_lower = subreddit_name.lower()
+
+    if allowed_subreddits and subreddit_lower not in allowed_subreddits:
+        return [], {
+            "status": "skipped_subreddit",
+            "post_id": submission.id,
+            "subreddit": subreddit_name,
+            "error": None,
+        }
+
+    post_created = submission.created_utc
+
+    if start_ts is not None and post_created < start_ts:
+        return [], {
+            "status": "skipped_date",
+            "post_id": submission.id,
+            "subreddit": subreddit_name,
+            "error": None,
+        }
+
+    if end_ts is not None and post_created > end_ts:
+        return [], {
+            "status": "skipped_date",
+            "post_id": submission.id,
+            "subreddit": subreddit_name,
+            "error": None,
+        }
+
+    cutoff_utc = post_created + (window_days * 86400)
+    rows = []
+
+    rows.append({
+        "event_id": f"post_{submission.id}",
+        "post_id": submission.id,
+        "comment_id": None,
+        "parent_id": None,
+        "type": "post",
+        "subreddit": subreddit_name,
+        "created_utc": submission.created_utc,
+        "depth": 0,
+        "author": str(submission.author) if submission.author is not None else None,
+        "score": submission.score,
+        "title": submission.title,
+        "selftext": submission.selftext,
+        "body": None,
+        "url": submission.url,
+        "permalink": f"https://www.reddit.com{submission.permalink}",
+        "discovered_for": discovered_for,
+        "discovered_alias": discovered_alias,
+    })
+
+    for comment in submission.comments.list():
+        depth = getattr(comment, "depth", None)
+        if depth is None:
+            continue
+        if depth > depth_cap:
+            continue
+        if comment.created_utc > cutoff_utc:
+            continue
+
+        comment_score = comment.score if comment.score is not None else 0
+        if comment_score < score_min:
+            continue
+
+        rows.append({
+            "event_id": f"comment_{comment.id}",
+            "post_id": submission.id,
+            "comment_id": comment.id,
+            "parent_id": comment.parent_id,
+            "type": "comment",
+            "subreddit": subreddit_name,
+            "created_utc": comment.created_utc,
+            "depth": depth,
+            "author": str(comment.author) if comment.author is not None else None,
+            "score": comment_score,
+            "title": None,
+            "selftext": None,
+            "body": comment.body,
+            "url": submission.url,
+            "permalink": f"https://www.reddit.com{comment.permalink}",
+            "discovered_for": discovered_for,
+            "discovered_alias": discovered_alias,
+        })
+
+    return rows, {
+        "status": "collected",
+        "post_id": submission.id,
+        "subreddit": subreddit_name,
+        "error": None,
+    }
+
+
+def flush_rows(rows_buffer, events_dir):
+    if not rows_buffer:
+        return None, 0
+
+    df = pd.DataFrame(rows_buffer).drop_duplicates(subset=["event_id"])
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    outfile = Path(events_dir) / f"scum_events_{ts}.parquet"
+    df.to_parquet(outfile, index=False)
+    return outfile, len(df)
+
 
 def main():
     args = parse_args()
 
-    _, paths, settings = load_configs()
+    firms, paths, settings = load_configs()
     env = load_env(paths["env_path"])
 
-    ensure_dir(paths["scored_events_dir"])
+    reddit = build_reddit_client(env)
+    serpapi_key = env["SERPAPI_API_KEY"]
 
-    anthropic_client, openai_client, gemini_client = build_clients(env)
+    if not serpapi_key:
+        raise ValueError("SERPAPI_API_KEY missing from env")
 
-    relevance_prompt_template = read_text(Path("prompts/event_firm_relevance_prompt.txt"))
-    uncertain_prompt_template = read_text(Path("prompts/event_firm_uncertain_prompt.txt"))
-    primary_prompt_template = read_text(Path("prompts/scum_primary_prompt.txt"))
-    tiebreaker_prompt_template = read_text(Path("prompts/scum_tiebreaker_prompt.txt"))
+    ensure_dir(paths["events_dir"])
+    ensure_dir(Path(paths["ledger_path"]).parent)
 
-    relevance_model = settings["models"]["score"]["relevance_filter"]
-    uncertain_model = settings["models"]["score"]["uncertain_adjudicator"]
-    primary_a_model = settings["models"]["score"]["primary_a"]
-    primary_b_model = settings["models"]["score"]["primary_b"]
-    tiebreaker_model = settings["models"]["score"]["tiebreaker"]
+    ledger = read_ledger(paths["ledger_path"])
 
-    retry_limit = settings["scoring"]["retry_limit"]
-    request_timeout = settings["scoring"]["request_timeout"]
-    autosave_every = settings["scoring"]["autosave_every_n_rows"]
-    disagree_threshold = settings["scoring"]["disagree_threshold"]
-    uncertain_keep_threshold = settings["scoring"].get("uncertain_keep_threshold", 0.92)
+    allowed_subreddits = {s.lower() for s in settings.get("subreddits", [])}
+    depth_cap = settings["collection"]["depth_cap"]
+    window_days = settings["collection"]["window_days"]
+    score_min = settings["collection"]["score_min"]
+    max_pages = settings["collection"]["max_serpapi_pages"]
+    serpapi_num = settings["collection"]["serpapi_num"]
+    autosave_every_n_posts = settings["collection"]["autosave_every_n_posts"]
 
-    latest_event_file = latest_parquet(paths["event_firm_dir"])
-    latest_thread_file = latest_parquet(paths["thread_firm_dir"])
+    start_ts = to_timestamp(args.start_date)
+    end_ts = to_timestamp(args.end_date)
 
-    event_df = pd.read_parquet(latest_event_file)
-    thread_df = pd.read_parquet(latest_thread_file)
+    if args.fund:
+        selected_firms = [f for f in firms["firms"] if f["canonical_name"].lower() == args.fund.lower()]
+        if not selected_firms:
+            raise ValueError(f"Fund not found in firms.yaml: {args.fund}")
+    else:
+        selected_firms = firms["firms"]
 
-    post_text_map, comment_text_map = build_parent_lookup(event_df)
+    discovered_rows = []
 
-    merge_cols = [
-        "post_id",
-        "canonical_name",
-        "thread_title",
-        "thread_text",
-        "llm_rationale",
-    ]
+    for firm in selected_firms:
+        canonical_name = firm["canonical_name"]
+        aliases = firm.get("aliases", [])
 
-    scored_df = event_df.merge(
-        thread_df[merge_cols].drop_duplicates(subset=["post_id", "canonical_name"]),
-        on=["post_id", "canonical_name"],
-        how="left",
-    )
+        print(f"\n=== DISCOVERY: {canonical_name} ===")
 
-    scored_df["parent_text"] = scored_df.apply(
-        lambda r: get_parent_text(r, post_text_map=post_text_map, comment_text_map=comment_text_map),
-        axis=1,
-    )
-
-    if args.limit is not None:
-        scored_df = scored_df.head(args.limit).copy()
-
-    out_cols = [
-        "parent_text",
-        "relevance_decision",
-        "relevance_confidence",
-        "relevance_reason",
-        "effective_relevance_decision",
-        "uncertain_adjudication_decision",
-        "uncertain_adjudication_confidence",
-        "uncertain_adjudication_reason",
-        "primary_a_sentiment",
-        "primary_a_confidence",
-        "primary_a_scum",
-        "primary_b_sentiment",
-        "primary_b_confidence",
-        "primary_b_scum",
-        "tiebreaker_sentiment",
-        "tiebreaker_confidence",
-        "tiebreaker_scum",
-        "tiebreaker_reason",
-        "final_sentiment",
-        "final_confidence",
-        "final_scum",
-        "solomon_triggered",
-    ]
-    for c in out_cols:
-        if c not in scored_df.columns:
-            scored_df[c] = None
-
-    rows_since_save = 0
-
-    for idx, row in scored_df.iterrows():
-        parent_text = safe_text(row.get("parent_text"))
-
-        relevance_payload = build_format_payload(row, parent_text=parent_text)
-        relevance_prompt = relevance_prompt_template.format_map(relevance_payload)
-
-        relevance_text = call_model(
-            model_name=relevance_model,
-            prompt=relevance_prompt,
-            anthropic_client=anthropic_client,
-            openai_client=openai_client,
-            gemini_client=gemini_client,
-            timeout_seconds=request_timeout,
-            max_tokens=160,
-            temperature=0.0,
-            retry_limit=retry_limit,
-        )
-
-        rel_decision, rel_conf, rel_reason = parse_relevance_response(relevance_text)
-
-        scored_df.at[idx, "relevance_decision"] = rel_decision
-        scored_df.at[idx, "relevance_confidence"] = rel_conf
-        scored_df.at[idx, "relevance_reason"] = rel_reason
-
-        effective_rel = rel_decision
-
-        if rel_decision == "DROP":
-            scored_df.at[idx, "effective_relevance_decision"] = "DROP"
-            print(f"DROP: {row['event_id']} / {row['canonical_name']}")
-            rows_since_save += 1
-
-            if rows_since_save >= autosave_every:
-                outfile = autosave_df(scored_df, paths["scored_events_dir"])
-                print(f"AUTOSAVED: {outfile}")
-                rows_since_save = 0
-
-            continue
-
-        if rel_decision == "UNCERTAIN":
-            uncertain_payload = build_format_payload(row, parent_text=parent_text)
-            uncertain_prompt = uncertain_prompt_template.format_map(uncertain_payload)
-
-            uncertain_text = call_model(
-                model_name=uncertain_model,
-                prompt=uncertain_prompt,
-                anthropic_client=anthropic_client,
-                openai_client=openai_client,
-                gemini_client=gemini_client,
-                timeout_seconds=request_timeout,
-                max_tokens=180,
-                temperature=0.0,
-                retry_limit=retry_limit,
-            )
-
-            u_decision, u_conf, u_reason = parse_relevance_response(uncertain_text)
-
-            scored_df.at[idx, "uncertain_adjudication_decision"] = u_decision
-            scored_df.at[idx, "uncertain_adjudication_confidence"] = u_conf
-            scored_df.at[idx, "uncertain_adjudication_reason"] = u_reason
-
-            if u_decision == "KEEP" and u_conf is not None and u_conf >= uncertain_keep_threshold:
-                effective_rel = "KEEP"
-            else:
-                effective_rel = "DROP"
-                scored_df.at[idx, "effective_relevance_decision"] = "DROP"
-                print(
-                    f"FLUSH_UNCERTAIN: {row['event_id']} / {row['canonical_name']} | "
-                    f"initial=UNCERTAIN | adjudicated={u_decision} @ {u_conf}"
+        for alias in aliases:
+            try:
+                urls = search_reddit_urls(
+                    query=alias,
+                    serpapi_key=serpapi_key,
+                    max_pages=max_pages,
+                    num=serpapi_num,
+                    allowed_subreddits=allowed_subreddits,
                 )
-                rows_since_save += 1
 
-                if rows_since_save >= autosave_every:
-                    outfile = autosave_df(scored_df, paths["scored_events_dir"])
-                    print(f"AUTOSAVED: {outfile}")
-                    rows_since_save = 0
+                print(f"alias='{alias}' -> {len(urls)} usable urls")
 
-                continue
+                now_utc = datetime.now(timezone.utc).isoformat()
+                for url in urls:
+                    discovered_rows.append({
+                        "url": url,
+                        "discovered_for": canonical_name,
+                        "discovered_alias": alias,
+                        "discovered_at_utc": now_utc,
+                    })
 
-        scored_df.at[idx, "effective_relevance_decision"] = effective_rel
+            except Exception as e:
+                print(f"discovery_error | fund={canonical_name} | alias={alias} | error={e}")
 
-        primary_payload = build_format_payload(row, parent_text=parent_text)
-        primary_prompt = primary_prompt_template.format_map(primary_payload)
+    ledger = upsert_discoveries(ledger, discovered_rows)
+    write_ledger(ledger, paths["ledger_path"])
 
-        a_s, a_c, _a_reason, a_raw = call_and_parse_sentiment(
-            model_name=primary_a_model,
-            prompt=primary_prompt,
-            anthropic_client=anthropic_client,
-            openai_client=openai_client,
-            gemini_client=gemini_client,
-            timeout_seconds=request_timeout,
-            max_tokens=220,
-            temperature=0.1,
-            transport_retry_limit=retry_limit,
-            semantic_retry_limit=2,
-        )
-        a_scum = scum_score(a_s, a_c)
+    pending_statuses = {"new", "error"}
+    pending = ledger[ledger["status"].fillna("new").isin(pending_statuses)].copy()
 
-        b_s, b_c, _b_reason, b_raw = call_and_parse_sentiment(
-            model_name=primary_b_model,
-            prompt=primary_prompt,
-            anthropic_client=anthropic_client,
-            openai_client=openai_client,
-            gemini_client=gemini_client,
-            timeout_seconds=request_timeout,
-            max_tokens=220,
-            temperature=0.1,
-            transport_retry_limit=retry_limit,
-            semantic_retry_limit=2,
-        )
-        b_scum = scum_score(b_s, b_c)
+    print(f"\nPending urls to collect: {len(pending)}")
 
-        if args.debug_primary_b:
-            print("\n--- PRIMARY_B RAW OUTPUT ---")
-            print(b_raw)
-            print("--- END PRIMARY_B RAW OUTPUT ---\n")
+    rows_buffer = []
+    posts_since_flush = 0
+    total_rows_written = 0
 
-        scored_df.at[idx, "primary_a_sentiment"] = a_s
-        scored_df.at[idx, "primary_a_confidence"] = a_c
-        scored_df.at[idx, "primary_a_scum"] = a_scum
+    status_counts = {
+        "collected": 0,
+        "skipped_subreddit": 0,
+        "skipped_date": 0,
+        "error": 0,
+    }
 
-        scored_df.at[idx, "primary_b_sentiment"] = b_s
-        scored_df.at[idx, "primary_b_confidence"] = b_c
-        scored_df.at[idx, "primary_b_scum"] = b_scum
+    processed = 0
+    report_every = 25
 
-        solomon = should_trigger_solomon(a_s, a_c, a_scum, b_s, b_c, b_scum, disagree_threshold)
-        scored_df.at[idx, "solomon_triggered"] = solomon
+    for idx, row in pending.iterrows():
+        url = row["url"]
 
-        final_s = None
-        final_c = None
-        final_sc = None
-
-        if solomon:
-            tie_payload = build_format_payload(
-                row,
-                parent_text=parent_text,
-                model_a_sentiment=a_s,
-                model_a_confidence=a_c,
-                model_b_sentiment=b_s,
-                model_b_confidence=b_c,
+        try:
+            rows, meta = fetch_thread(
+                reddit=reddit,
+                url=url,
+                discovered_for=row["discovered_for"],
+                discovered_alias=row["discovered_alias"],
+                depth_cap=depth_cap,
+                window_days=window_days,
+                score_min=score_min,
+                allowed_subreddits=allowed_subreddits,
+                start_ts=start_ts,
+                end_ts=end_ts,
             )
-            tie_prompt = tiebreaker_prompt_template.format_map(tie_payload)
 
-            t_s, t_c, t_reason, _t_raw = call_and_parse_sentiment(
-                model_name=tiebreaker_model,
-                prompt=tie_prompt,
-                anthropic_client=anthropic_client,
-                openai_client=openai_client,
-                gemini_client=gemini_client,
-                timeout_seconds=request_timeout,
-                max_tokens=260,
-                temperature=0.0,
-                transport_retry_limit=retry_limit,
-                semantic_retry_limit=2,
-            )
-            t_scum = scum_score(t_s, t_c)
+            ledger.at[idx, "post_id"] = meta["post_id"]
+            ledger.at[idx, "subreddit"] = meta["subreddit"]
+            ledger.at[idx, "status"] = meta["status"]
+            ledger.at[idx, "collected_at_utc"] = datetime.now(timezone.utc).isoformat()
+            ledger.at[idx, "error"] = meta["error"]
 
-            scored_df.at[idx, "tiebreaker_sentiment"] = t_s
-            scored_df.at[idx, "tiebreaker_confidence"] = t_c
-            scored_df.at[idx, "tiebreaker_scum"] = t_scum
-            scored_df.at[idx, "tiebreaker_reason"] = t_reason
+            status_counts[meta["status"]] = status_counts.get(meta["status"], 0) + 1
 
-            if not is_missing_score(t_s, t_c):
-                final_s = t_s
-                final_c = t_c
-                final_sc = t_scum
-            elif not is_missing_score(a_s, a_c) and is_missing_score(b_s, b_c):
-                final_s = a_s
-                final_c = a_c
-                final_sc = a_scum
-            elif not is_missing_score(b_s, b_c) and is_missing_score(a_s, a_c):
-                final_s = b_s
-                final_c = b_c
-                final_sc = b_scum
-            else:
-                final_s = None
-                final_c = None
-                final_sc = None
-        else:
-            if not is_missing_score(a_s, a_c) and not is_missing_score(b_s, b_c):
-                final_s = round((a_s + b_s) / 2, 4)
-                final_c = round((a_c + b_c) / 2, 4)
-                final_sc = scum_score(final_s, final_c)
-            elif not is_missing_score(a_s, a_c):
-                final_s = a_s
-                final_c = a_c
-                final_sc = a_scum
-            elif not is_missing_score(b_s, b_c):
-                final_s = b_s
-                final_c = b_c
-                final_sc = b_scum
+            if rows:
+                rows_buffer.extend(rows)
+                print(f"collected: {url} -> {len(rows)} events")
 
-        scored_df.at[idx, "final_sentiment"] = final_s
-        scored_df.at[idx, "final_confidence"] = final_c
-        scored_df.at[idx, "final_scum"] = final_sc
+            posts_since_flush += 1
+            processed += 1
 
-        print(
-            f"{row['event_id']} | {row['canonical_name']} | "
-            f"rel={effective_rel} | A={a_scum} | B={b_scum} | "
-            f"solomon={solomon} | final={final_sc}"
-        )
+            if processed % report_every == 0:
+                print(
+                    "PROGRESS | "
+                    f"processed={processed}/{len(pending)} | "
+                    f"collected={status_counts.get('collected', 0)} | "
+                    f"skipped_subreddit={status_counts.get('skipped_subreddit', 0)} | "
+                    f"skipped_date={status_counts.get('skipped_date', 0)} | "
+                    f"errors={status_counts.get('error', 0)} | "
+                    f"buffered_rows={len(rows_buffer)}"
+                )
 
-        rows_since_save += 1
-        if rows_since_save >= autosave_every:
-            outfile = autosave_df(scored_df, paths["scored_events_dir"])
-            print(f"AUTOSAVED: {outfile}")
-            rows_since_save = 0
+            if posts_since_flush >= autosave_every_n_posts:
+                outfile, nrows = flush_rows(rows_buffer, paths["events_dir"])
+                if outfile:
+                    total_rows_written += nrows
+                    print(f"AUTOSAVED: {outfile} ({nrows} rows)")
+                rows_buffer = []
+                posts_since_flush = 0
+                write_ledger(ledger, paths["ledger_path"])
 
-    outfile = autosave_df(scored_df, paths["scored_events_dir"])
+        except Exception as e:
+            ledger.at[idx, "status"] = "error"
+            ledger.at[idx, "error"] = str(e)
+            ledger.at[idx, "collected_at_utc"] = datetime.now(timezone.utc).isoformat()
+            status_counts["error"] += 1
+            processed += 1
+            print(f"error: {url} -> {e}")
 
-    initial_keep = int((scored_df["relevance_decision"] == "KEEP").sum())
-    initial_uncertain = int((scored_df["relevance_decision"] == "UNCERTAIN").sum())
+            if processed % report_every == 0:
+                print(
+                    "PROGRESS | "
+                    f"processed={processed}/{len(pending)} | "
+                    f"collected={status_counts.get('collected', 0)} | "
+                    f"skipped_subreddit={status_counts.get('skipped_subreddit', 0)} | "
+                    f"skipped_date={status_counts.get('skipped_date', 0)} | "
+                    f"errors={status_counts.get('error', 0)} | "
+                    f"buffered_rows={len(rows_buffer)}"
+                )
 
-    rescued_uncertain = int(
-        (
-            (scored_df["uncertain_adjudication_decision"] == "KEEP")
-            & (
-                pd.to_numeric(
-                    scored_df["uncertain_adjudication_confidence"],
-                    errors="coerce",
-                ) >= uncertain_keep_threshold
-            )
-        ).sum()
-    )
+    write_ledger(ledger, paths["ledger_path"])
 
-    final_scored = int(scored_df["final_scum"].notna().sum())
-    solomon_count = int(scored_df["solomon_triggered"].astype("boolean").fillna(False).sum())
+    outfile, nrows = flush_rows(rows_buffer, paths["events_dir"])
+    if outfile:
+        total_rows_written += nrows
+        print(f"\nFINAL SAVE: {outfile} ({nrows} rows)")
 
-    print("\nSaved:")
-    print(outfile)
-    print("\nCounts:")
-    print("Rows scored:", len(scored_df))
-    print("Initial KEEP rows:", initial_keep)
-    print("Initial UNCERTAIN rows:", initial_uncertain)
-    print("Uncertain rescued:", rescued_uncertain)
-    print("Final scored rows:", final_scored)
-    print("Solomon triggered:", solomon_count)
+    print("\nDone.")
+    print("Total rows written:", total_rows_written)
+    print("Collected:", status_counts.get("collected", 0))
+    print("Skipped subreddit:", status_counts.get("skipped_subreddit", 0))
+    print("Skipped date:", status_counts.get("skipped_date", 0))
+    print("Errors:", status_counts.get("error", 0))
 
 
 if __name__ == "__main__":
