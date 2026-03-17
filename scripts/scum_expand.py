@@ -25,9 +25,15 @@ def build_alias_patterns(firms_config):
                 continue
 
             if alias_clean.lower() in risky_aliases or len(alias_clean) <= 3:
-                pattern = re.compile(rf"(?<!\w){re.escape(alias_clean)}(?!\w)", flags=re.IGNORECASE)
+                pattern = re.compile(
+                    rf"(?<!\w){re.escape(alias_clean)}(?!\w)",
+                    flags=re.IGNORECASE,
+                )
             else:
-                pattern = re.compile(rf"\b{re.escape(alias_clean)}\b", flags=re.IGNORECASE)
+                pattern = re.compile(
+                    rf"\b{re.escape(alias_clean)}\b",
+                    flags=re.IGNORECASE,
+                )
 
             compiled.append((alias_clean, pattern))
 
@@ -112,7 +118,7 @@ def safe_json_load(text):
 
 
 def call_thread_detector(client, model_name, prompt, retry_limit=3, sleep_seconds=1):
-    for _ in range(retry_limit):
+    for attempt in range(1, retry_limit + 1):
         try:
             resp = client.messages.create(
                 model=model_name,
@@ -123,8 +129,9 @@ def call_thread_detector(client, model_name, prompt, retry_limit=3, sleep_second
             )
             text = resp.content[0].text.strip()
             return safe_json_load(text)
+
         except Exception as e:
-            print(f"LLM thread detector error, retrying: {e}")
+            print(f"LLM thread detector error (attempt {attempt}/{retry_limit}), retrying: {e}")
             time.sleep(sleep_seconds)
 
     return []
@@ -174,14 +181,26 @@ def normalize_llm_candidates(llm_output, allowed_names):
     return rows
 
 
-def build_thread_firm_pairs(events_df, alias_patterns, detector_client, detector_model, detector_prompt):
+def build_thread_firm_pairs(
+    events_df,
+    alias_patterns,
+    detector_client,
+    detector_model,
+    detector_prompt,
+    thread_firm_dir,
+    autosave_every=100,
+):
     rows = []
     grouped = events_df.groupby("post_id", dropna=True)
+    total_threads = len(grouped)
     canonical_names = [f["canonical_name"] for f in alias_patterns]
 
-    for post_id, group in grouped:
+    autosave_path = Path(thread_firm_dir) / "thread_firm_autosave.parquet"
+
+    for i, (post_id, group) in enumerate(grouped, start=1):
         post_rows = group[group["type"] == "post"].copy()
         if post_rows.empty:
+            print(f"[{i}/{total_threads}] thread {post_id}: skipped (no post row)")
             continue
 
         post_row = post_rows.iloc[0]
@@ -230,7 +249,17 @@ def build_thread_firm_pairs(events_df, alias_patterns, detector_client, detector
                 "llm_rationale": llm_info.get("llm_rationale"),
             })
 
-        print(f"thread {post_id}: regex={len(regex_hits)} llm={len(llm_hits)} final={len(final_names)}")
+        print(
+            f"[{i}/{total_threads}] thread {post_id}: "
+            f"regex={len(regex_hits)} llm={len(llm_hits)} final={len(final_names)}"
+        )
+
+        if i % autosave_every == 0:
+            tmp_df = pd.DataFrame(rows)
+            if not tmp_df.empty:
+                tmp_df = tmp_df.drop_duplicates(subset=["post_id", "canonical_name"])
+            tmp_df.to_parquet(autosave_path, index=False)
+            print(f"AUTOSAVED THREADS: {len(tmp_df)} rows -> {autosave_path}")
 
     if not rows:
         return pd.DataFrame(columns=[
@@ -239,10 +268,14 @@ def build_thread_firm_pairs(events_df, alias_patterns, detector_client, detector
             "candidate_strength", "mention_type", "llm_rationale"
         ])
 
-    return pd.DataFrame(rows).drop_duplicates(subset=["post_id", "canonical_name"])
+    final_df = pd.DataFrame(rows).drop_duplicates(subset=["post_id", "canonical_name"])
+    final_df.to_parquet(autosave_path, index=False)
+    print(f"FINAL THREAD AUTOSAVE: {len(final_df)} rows -> {autosave_path}")
+
+    return final_df
 
 
-def build_event_firm_pairs(events_df, thread_firm_df, alias_patterns):
+def build_event_firm_pairs(events_df, thread_firm_df):
     rows = []
 
     thread_firm_map = {}
@@ -251,39 +284,16 @@ def build_event_firm_pairs(events_df, thread_firm_df, alias_patterns):
 
     for _, row in events_df.iterrows():
         event_text = row["event_text"]
-        direct_matches = regex_matches(event_text, alias_patterns)
-        direct_firms = {m["canonical_name"]: m["matched_aliases"] for m in direct_matches}
-
         thread_firms = thread_firm_map.get(row["post_id"], set())
 
-        for canonical_name, aliases in direct_firms.items():
-            rows.append({
-                "event_id": row["event_id"],
-                "post_id": row["post_id"],
-                "comment_id": row["comment_id"],
-                "parent_id": row["parent_id"],
-                "canonical_name": canonical_name,
-                "matched_aliases": ", ".join(sorted(set(aliases))),
-                "candidate_source": "direct_event_match",
-                "event_text": event_text,
-                "created_utc": row["created_utc"],
-                "depth": row["depth"],
-                "score": row["score"],
-                "subreddit": row["subreddit"],
-            })
-
         for canonical_name in thread_firms:
-            if canonical_name in direct_firms:
-                continue
-
             rows.append({
                 "event_id": row["event_id"],
                 "post_id": row["post_id"],
                 "comment_id": row["comment_id"],
                 "parent_id": row["parent_id"],
                 "canonical_name": canonical_name,
-                "matched_aliases": None,
-                "candidate_source": "thread_context",
+                "candidate_source": "thread_context_or_direct",
                 "event_text": event_text,
                 "created_utc": row["created_utc"],
                 "depth": row["depth"],
@@ -294,7 +304,7 @@ def build_event_firm_pairs(events_df, thread_firm_df, alias_patterns):
     if not rows:
         return pd.DataFrame(columns=[
             "event_id", "post_id", "comment_id", "parent_id", "canonical_name",
-            "matched_aliases", "candidate_source", "event_text", "created_utc",
+            "candidate_source", "event_text", "created_utc",
             "depth", "score", "subreddit"
         ])
 
@@ -309,7 +319,9 @@ def main():
     ensure_dir(paths["event_firm_dir"])
 
     detector_model = settings["models"]["expand"]["thread_detector"]
-    detector_prompt = load_prompt(str(Path(__file__).resolve().parents[1] / "prompts" / "relevance_prompt.txt"))
+    detector_prompt = load_prompt(
+        str(Path(__file__).resolve().parents[1] / "prompts" / "relevance_prompt.txt")
+    )
 
     if not env["ANTHROPIC_API_KEY"]:
         raise ValueError("ANTHROPIC_API_KEY missing from env")
@@ -320,30 +332,40 @@ def main():
     events_df = load_latest_events(paths["events_dir"]).copy()
     events_df["event_text"] = events_df.apply(assemble_event_text, axis=1)
 
+    print(f"Loaded raw events: {len(events_df)}")
+    print(f"Unique threads: {events_df['post_id'].nunique()}")
+
     thread_firm_df = build_thread_firm_pairs(
         events_df=events_df,
         alias_patterns=alias_patterns,
         detector_client=detector_client,
         detector_model=detector_model,
         detector_prompt=detector_prompt,
+        thread_firm_dir=paths["thread_firm_dir"],
+        autosave_every=100,
     )
+
+    print(f"Built thread x firm pairs: {len(thread_firm_df)}")
 
     event_firm_df = build_event_firm_pairs(
         events_df=events_df,
         thread_firm_df=thread_firm_df,
-        alias_patterns=alias_patterns,
     )
 
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     thread_out = Path(paths["thread_firm_dir"]) / f"thread_firm_pairs_{ts}.parquet"
     event_out = Path(paths["event_firm_dir"]) / f"event_firm_pairs_{ts}.parquet"
+    event_autosave_out = Path(paths["event_firm_dir"]) / "event_firm_autosave.parquet"
 
     thread_firm_df.to_parquet(thread_out, index=False)
     event_firm_df.to_parquet(event_out, index=False)
+    event_firm_df.to_parquet(event_autosave_out, index=False)
 
     print("\nSaved:")
     print(thread_out)
     print(event_out)
+    print(event_autosave_out)
+
     print("\nCounts:")
     print("Raw events:", len(events_df))
     print("Thread x firm pairs:", len(thread_firm_df))
