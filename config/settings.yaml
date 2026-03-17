@@ -8,7 +8,7 @@ subreddits:
   - finance
 
 collection:
-  max_serpapi_pages: 4
+  max_serpapi_pages: 7
   serpapi_num: 10
   depth_cap: 3
   window_days: 60
