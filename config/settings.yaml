@@ -9,7 +9,6 @@ subreddits:
 
 collection:
   max_serpapi_pages: 7
-  serpapi_num: 10
   depth_cap: 3
   window_days: 60
   score_min: 1
