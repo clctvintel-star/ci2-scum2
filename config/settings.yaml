@@ -8,12 +8,12 @@ subreddits:
   - finance
 
 collection:
-  max_serpapi_pages: 10
+  max_serpapi_pages: 4
   serpapi_num: 100
   depth_cap: 3
   window_days: 60
   score_min: 1
-  autosave_every_n_posts: 25
+  autosave_every_n_posts: 50
 
 scoring:
   max_comments_for_prompt: 20
