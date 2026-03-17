@@ -44,10 +44,11 @@ def normalize_reddit_url(url):
         return None
 
     parsed = urlparse(url)
-    if "reddit.com" not in parsed.netloc:
+    netloc = (parsed.netloc or "").lower()
+    if "reddit.com" not in netloc:
         return None
 
-    path = parsed.path.rstrip("/")
+    path = (parsed.path or "").rstrip("/")
     if "/comments/" not in path:
         return None
 
@@ -59,6 +60,21 @@ def normalize_reddit_url(url):
         fragment="",
     )
     return urlunparse(clean).rstrip("/")
+
+
+def extract_subreddit_from_url(url):
+    if not url:
+        return None
+
+    try:
+        parsed = urlparse(url)
+        parts = [p for p in parsed.path.split("/") if p]
+        if len(parts) >= 2 and parts[0].lower() == "r":
+            return parts[1]
+    except Exception:
+        return None
+
+    return None
 
 
 def build_reddit_client(env):
@@ -123,38 +139,65 @@ def upsert_discoveries(ledger_df, discovered_rows):
     return ledger_df
 
 
-def search_reddit_urls(query, serpapi_key, max_pages, num):
+def search_reddit_urls(query, serpapi_key, max_pages, num, allowed_subreddits=None):
     urls = []
+    seen_urls = set()
 
     for page in range(max_pages):
+        start = page * num
         params = {
             "engine": "google",
             "q": f"\"{query}\" site:reddit.com",
             "api_key": serpapi_key,
             "num": num,
-            "start": page * num,
+            "start": start,
         }
+
         search = GoogleSearch(params)
         results = search.get_dict()
-
-        print("\nSERPAPI PARAMS:")
-        print(params)
-        print("SERPAPI RAW RESULT:")
-        print(results)
-
         organic = results.get("organic_results", [])
 
         if not organic:
+            print(f"  page {page + 1}: empty results, stopping")
             break
+
+        page_candidate_count = 0
+        page_subreddit_filtered = 0
+        page_new_unique = 0
 
         for r in organic:
             link = normalize_reddit_url(r.get("link"))
-            if link:
+            if not link:
+                continue
+
+            page_candidate_count += 1
+
+            subreddit = extract_subreddit_from_url(link)
+            if allowed_subreddits and subreddit and subreddit.lower() not in allowed_subreddits:
+                page_subreddit_filtered += 1
+                continue
+
+            if link not in seen_urls:
+                seen_urls.add(link)
                 urls.append(link)
+                page_new_unique += 1
+
+        print(
+            f"  page {page + 1}/{max_pages} | "
+            f"organic={len(organic)} | "
+            f"comment_threads={page_candidate_count} | "
+            f"subreddit_filtered={page_subreddit_filtered} | "
+            f"new_urls={page_new_unique} | "
+            f"running_total={len(urls)}"
+        )
+
+        if page_new_unique == 0:
+            print("  no new usable URLs on this page, stopping")
+            break
 
         time.sleep(1)
 
-    return sorted(set(urls))
+    return urls
 
 
 def fetch_thread(
@@ -326,9 +369,10 @@ def main():
                     serpapi_key=serpapi_key,
                     max_pages=max_pages,
                     num=serpapi_num,
+                    allowed_subreddits=allowed_subreddits,
                 )
 
-                print(f"alias='{alias}' -> {len(urls)} urls")
+                print(f"alias='{alias}' -> {len(urls)} usable urls")
 
                 now_utc = datetime.now(timezone.utc).isoformat()
                 for url in urls:
@@ -340,7 +384,7 @@ def main():
                     })
 
             except Exception as e:
-                print(f"Discovery error for {canonical_name} / {alias}: {e}")
+                print(f"discovery_error | fund={canonical_name} | alias={alias} | error={e}")
 
     ledger = upsert_discoveries(ledger, discovered_rows)
     write_ledger(ledger, paths["ledger_path"])
@@ -353,6 +397,16 @@ def main():
     rows_buffer = []
     posts_since_flush = 0
     total_rows_written = 0
+
+    status_counts = {
+        "collected": 0,
+        "skipped_subreddit": 0,
+        "skipped_date": 0,
+        "error": 0,
+    }
+
+    processed = 0
+    report_every = 25
 
     for idx, row in pending.iterrows():
         url = row["url"]
@@ -377,11 +431,25 @@ def main():
             ledger.at[idx, "collected_at_utc"] = datetime.now(timezone.utc).isoformat()
             ledger.at[idx, "error"] = meta["error"]
 
+            status_counts[meta["status"]] = status_counts.get(meta["status"], 0) + 1
+
             if rows:
                 rows_buffer.extend(rows)
+                print(f"collected: {url} -> {len(rows)} events")
 
             posts_since_flush += 1
-            print(f"{meta['status']}: {url} -> {len(rows)} events")
+            processed += 1
+
+            if processed % report_every == 0:
+                print(
+                    "PROGRESS | "
+                    f"processed={processed}/{len(pending)} | "
+                    f"collected={status_counts.get('collected', 0)} | "
+                    f"skipped_subreddit={status_counts.get('skipped_subreddit', 0)} | "
+                    f"skipped_date={status_counts.get('skipped_date', 0)} | "
+                    f"errors={status_counts.get('error', 0)} | "
+                    f"buffered_rows={len(rows_buffer)}"
+                )
 
             if posts_since_flush >= autosave_every_n_posts:
                 outfile, nrows = flush_rows(rows_buffer, paths["events_dir"])
@@ -396,7 +464,20 @@ def main():
             ledger.at[idx, "status"] = "error"
             ledger.at[idx, "error"] = str(e)
             ledger.at[idx, "collected_at_utc"] = datetime.now(timezone.utc).isoformat()
+            status_counts["error"] += 1
+            processed += 1
             print(f"error: {url} -> {e}")
+
+            if processed % report_every == 0:
+                print(
+                    "PROGRESS | "
+                    f"processed={processed}/{len(pending)} | "
+                    f"collected={status_counts.get('collected', 0)} | "
+                    f"skipped_subreddit={status_counts.get('skipped_subreddit', 0)} | "
+                    f"skipped_date={status_counts.get('skipped_date', 0)} | "
+                    f"errors={status_counts.get('error', 0)} | "
+                    f"buffered_rows={len(rows_buffer)}"
+                )
 
     write_ledger(ledger, paths["ledger_path"])
 
@@ -407,6 +488,10 @@ def main():
 
     print("\nDone.")
     print("Total rows written:", total_rows_written)
+    print("Collected:", status_counts.get("collected", 0))
+    print("Skipped subreddit:", status_counts.get("skipped_subreddit", 0))
+    print("Skipped date:", status_counts.get("skipped_date", 0))
+    print("Errors:", status_counts.get("error", 0))
 
 
 if __name__ == "__main__":
