@@ -9,11 +9,11 @@ subreddits:
 
 collection:
   max_serpapi_pages: 4
-  serpapi_num: 100
+  serpapi_num: 10
   depth_cap: 3
   window_days: 60
   score_min: 1
-  autosave_every_n_posts: 200
+  autosave_every_n_posts: 25
 
 scoring:
   max_comments_for_prompt: 20
