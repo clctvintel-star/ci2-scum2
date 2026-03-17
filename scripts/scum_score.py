@@ -15,44 +15,105 @@ from openai import OpenAI
 from utils import load_configs, load_env, ensure_dir
 
 
-# --------------------------------------------------
+# ==========================================================
 # args
-# --------------------------------------------------
+# ==========================================================
 
 def parse_args():
     parser = argparse.ArgumentParser(description="SCUM2 event-level scorer")
+
     parser.add_argument("--limit", type=int, default=None, help="Optional row limit for testing")
+    parser.add_argument("--firm", type=str, default=None, help="Score only one canonical firm name")
+    parser.add_argument(
+        "--source-bucket",
+        type=str,
+        choices=["direct", "context"],
+        default=None,
+        help="Optional filter for source bucket"
+    )
+    parser.add_argument(
+        "--sample-per-firm",
+        type=int,
+        default=None,
+        help="Optional per-firm sample size after filters"
+    )
+
+    parser.add_argument(
+        "--event-file",
+        type=str,
+        default=None,
+        help="Exact event_firm_pairs parquet path. If omitted, latest file is used."
+    )
+    parser.add_argument(
+        "--thread-file",
+        type=str,
+        default=None,
+        help="Exact thread_firm_pairs parquet path. If omitted, latest file is used."
+    )
+
+    parser.add_argument(
+        "--show-latest-files",
+        action="store_true",
+        help="Print latest thread/event parquet files and exit"
+    )
+
     parser.add_argument(
         "--debug-primary-b",
         action="store_true",
-        help="Print raw primary_b outputs for debugging",
+        help="Print raw primary_b outputs for debugging"
     )
+    parser.add_argument(
+        "--debug-save-raw",
+        action="store_true",
+        help="Persist raw model outputs to dataframe columns"
+    )
+
     return parser.parse_args()
 
 
-# --------------------------------------------------
+# ==========================================================
 # helpers
-# --------------------------------------------------
+# ==========================================================
 
 class SafeDict(dict):
     def __missing__(self, key):
         return "{" + key + "}"
 
 
-def latest_parquet(directory: str) -> Path:
-    files = sorted(Path(directory).glob("*.parquet"))
+def latest_parquet(directory: str, prefix: Optional[str] = None) -> Path:
+    pattern = "*.parquet" if prefix is None else f"{prefix}_*.parquet"
+    files = sorted(Path(directory).glob(pattern))
     if not files:
-        raise FileNotFoundError(f"No parquet files found in {directory}")
-    return files[-1]
+        raise FileNotFoundError(f"No parquet files found in {directory} matching {pattern}")
+    return max(files, key=lambda p: p.stat().st_mtime)
+
+
+def resolve_input_file(explicit_path: Optional[str], directory: str, prefix: str) -> Path:
+    if explicit_path:
+        path = Path(explicit_path)
+        if not path.exists():
+            raise FileNotFoundError(f"Input file not found: {path}")
+        return path
+    return latest_parquet(directory, prefix=prefix)
+
+
+def print_latest_files(paths: Dict[str, str]):
+    latest_event = latest_parquet(paths["event_firm_dir"], prefix="event_firm_pairs")
+    latest_thread = latest_parquet(paths["thread_firm_dir"], prefix="thread_firm_pairs")
+    print("Latest thread file:")
+    print(latest_thread)
+    print()
+    print("Latest event file:")
+    print(latest_event)
 
 
 def read_text(path: Path) -> str:
     return Path(path).read_text(encoding="utf-8")
 
 
-def autosave_df(df: pd.DataFrame, outdir: str) -> Path:
+def autosave_df(df: pd.DataFrame, outdir: str, prefix: str = "scored_events") -> Path:
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    outfile = Path(outdir) / f"scored_events_{ts}.parquet"
+    outfile = Path(outdir) / f"{prefix}_{ts}.parquet"
     df.to_parquet(outfile, index=False)
     return outfile
 
@@ -84,9 +145,18 @@ def safe_text(value: Any) -> str:
     return str(value).strip()
 
 
-# --------------------------------------------------
+def normalize_source_bucket(candidate_source: Any) -> str:
+    txt = safe_text(candidate_source).lower()
+    if txt == "direct_event_match":
+        return "direct"
+    if txt == "thread_context":
+        return "context"
+    return "unknown"
+
+
+# ==========================================================
 # parsing
-# --------------------------------------------------
+# ==========================================================
 
 def parse_relevance_response(text: Any) -> Tuple[Optional[str], Optional[float], Optional[str]]:
     if not isinstance(text, str):
@@ -123,10 +193,6 @@ def strip_code_fences(text: str) -> str:
 
 
 def coerce_incomplete_json(text: str) -> Optional[Dict[str, Any]]:
-    """
-    Conservative repair for truncated JSON like:
-    {"sentiment": 0.2, "confidence": 0.7, "explanation": "..."
-    """
     if not isinstance(text, str):
         return None
 
@@ -259,9 +325,9 @@ def should_trigger_solomon(
     return False
 
 
-# --------------------------------------------------
+# ==========================================================
 # parent context
-# --------------------------------------------------
+# ==========================================================
 
 def normalize_reddit_id(raw_id: Any) -> str:
     raw_id = safe_text(raw_id)
@@ -271,11 +337,6 @@ def normalize_reddit_id(raw_id: Any) -> str:
 
 
 def build_parent_lookup(events_df: pd.DataFrame) -> Tuple[Dict[str, str], Dict[str, str]]:
-    """
-    Returns:
-      post_text_map[post_id] = post event_text
-      comment_text_map[comment_id] = comment event_text
-    """
     post_text_map: Dict[str, str] = {}
     comment_text_map: Dict[str, str] = {}
 
@@ -312,7 +373,6 @@ def get_parent_text(
         parent_post_id = normalize_reddit_id(parent_id)
         return post_text_map.get(parent_post_id, "")
 
-    # fallback if raw parent_id has no prefix
     parent_norm = normalize_reddit_id(parent_id)
     if parent_norm in comment_text_map:
         return comment_text_map[parent_norm]
@@ -322,9 +382,9 @@ def get_parent_text(
     return ""
 
 
-# --------------------------------------------------
+# ==========================================================
 # clients
-# --------------------------------------------------
+# ==========================================================
 
 def build_clients(env):
     anthropic_client = Anthropic(api_key=env["ANTHROPIC_API_KEY"])
@@ -333,9 +393,9 @@ def build_clients(env):
     return anthropic_client, openai_client, gemini_client
 
 
-# --------------------------------------------------
+# ==========================================================
 # model calls
-# --------------------------------------------------
+# ==========================================================
 
 def call_anthropic(
     client,
@@ -495,10 +555,6 @@ def call_and_parse_sentiment(
     transport_retry_limit: int,
     semantic_retry_limit: int = 2,
 ) -> Tuple[Optional[float], Optional[float], Optional[str], str]:
-    """
-    Makes up to semantic_retry_limit attempts to get parseable JSON.
-    Transport retries happen inside call_model.
-    """
     last_raw = ""
 
     for attempt in range(semantic_retry_limit):
@@ -532,9 +588,9 @@ def call_and_parse_sentiment(
     return None, None, None, last_raw
 
 
-# --------------------------------------------------
+# ==========================================================
 # prompt payload
-# --------------------------------------------------
+# ==========================================================
 
 def build_format_payload(
     row,
@@ -549,8 +605,14 @@ def build_format_payload(
     event_text = safe_text(row.get("event_text"))
     matched_aliases = safe_text(row.get("matched_aliases"))
     candidate_source = safe_text(row.get("candidate_source"))
+    source_bucket = safe_text(row.get("source_bucket"))
     firm_name = safe_text(row.get("canonical_name"))
     parent_text = safe_text(parent_text)
+    mention_type = safe_text(row.get("mention_type"))
+    candidate_strength = row.get("candidate_strength")
+    thread_direct_match = row.get("thread_direct_match")
+    event_has_direct_regex_match = row.get("event_has_direct_regex_match")
+    llm_rationale = safe_text(row.get("llm_rationale"))
 
     return SafeDict(
         {
@@ -558,6 +620,12 @@ def build_format_payload(
             "FUND_NAME": firm_name,
             "MATCHED_ALIASES": matched_aliases,
             "CANDIDATE_SOURCE": candidate_source,
+            "SOURCE_BUCKET": source_bucket,
+            "MENTION_TYPE": mention_type,
+            "CANDIDATE_STRENGTH": "" if candidate_strength is None else candidate_strength,
+            "THREAD_DIRECT_MATCH": "" if thread_direct_match is None else thread_direct_match,
+            "EVENT_HAS_DIRECT_REGEX_MATCH": "" if event_has_direct_regex_match is None else event_has_direct_regex_match,
+            "LLM_RATIONALE": llm_rationale,
             "THREAD_TITLE": thread_title,
             "THREAD_TEXT": thread_text,
             "THREAD_POST": thread_text,
@@ -567,7 +635,6 @@ def build_format_payload(
             "MODEL_A_CONFIDENCE": "" if model_a_confidence is None else model_a_confidence,
             "MODEL_B_SENTIMENT": "" if model_b_sentiment is None else model_b_sentiment,
             "MODEL_B_CONFIDENCE": "" if model_b_confidence is None else model_b_confidence,
-            # backward-compat placeholders
             "title": thread_title,
             "post": f"Thread context:\n{thread_text}\n\nParent text:\n{parent_text}\n\nEvent text:\n{event_text}",
             "comments": "",
@@ -575,15 +642,115 @@ def build_format_payload(
     )
 
 
-# --------------------------------------------------
+# ==========================================================
+# data prep
+# ==========================================================
+
+def prepare_scoring_df(
+    event_df: pd.DataFrame,
+    thread_df: pd.DataFrame,
+) -> pd.DataFrame:
+    post_text_map, comment_text_map = build_parent_lookup(event_df)
+
+    merge_cols = [
+        "post_id",
+        "canonical_name",
+        "thread_title",
+        "thread_text",
+        "llm_rationale",
+        "mention_type",
+        "candidate_strength",
+        "thread_direct_match",
+        "regex_candidate_names",
+        "llm_candidate_names",
+        "llm_called",
+    ]
+
+    scored_df = event_df.merge(
+        thread_df[merge_cols].drop_duplicates(subset=["post_id", "canonical_name"]),
+        on=["post_id", "canonical_name"],
+        how="left",
+    )
+
+    scored_df["parent_text"] = scored_df.apply(
+        lambda r: get_parent_text(r, post_text_map=post_text_map, comment_text_map=comment_text_map),
+        axis=1,
+    )
+
+    scored_df["source_bucket"] = scored_df["candidate_source"].apply(normalize_source_bucket)
+
+    out_cols = [
+        "parent_text",
+        "source_bucket",
+        "relevance_decision",
+        "relevance_confidence",
+        "relevance_reason",
+        "effective_relevance_decision",
+        "uncertain_adjudication_decision",
+        "uncertain_adjudication_confidence",
+        "uncertain_adjudication_reason",
+        "primary_a_sentiment",
+        "primary_a_confidence",
+        "primary_a_scum",
+        "primary_b_sentiment",
+        "primary_b_confidence",
+        "primary_b_scum",
+        "tiebreaker_sentiment",
+        "tiebreaker_confidence",
+        "tiebreaker_scum",
+        "tiebreaker_reason",
+        "final_sentiment",
+        "final_confidence",
+        "final_scum",
+        "solomon_triggered",
+        "primary_a_raw",
+        "primary_b_raw",
+        "tiebreaker_raw",
+        "relevance_raw",
+        "uncertain_adjudication_raw",
+    ]
+    for c in out_cols:
+        if c not in scored_df.columns:
+            scored_df[c] = None
+
+    return scored_df
+
+
+def apply_filters(scored_df: pd.DataFrame, args) -> pd.DataFrame:
+    df = scored_df.copy()
+
+    if args.firm:
+        df = df[df["canonical_name"] == args.firm].copy()
+
+    if args.source_bucket:
+        df = df[df["source_bucket"] == args.source_bucket].copy()
+
+    if args.sample_per_firm is not None:
+        df = (
+            df.groupby("canonical_name", group_keys=False)
+              .head(args.sample_per_firm)
+              .copy()
+        )
+
+    if args.limit is not None:
+        df = df.head(args.limit).copy()
+
+    return df
+
+
+# ==========================================================
 # main
-# --------------------------------------------------
+# ==========================================================
 
 def main():
     args = parse_args()
 
     _, paths, settings = load_configs()
     env = load_env(paths["env_path"])
+
+    if args.show_latest_files:
+        print_latest_files(paths)
+        return
 
     ensure_dir(paths["scored_events_dir"])
 
@@ -606,63 +773,27 @@ def main():
     disagree_threshold = settings["scoring"]["disagree_threshold"]
     uncertain_keep_threshold = settings["scoring"].get("uncertain_keep_threshold", 0.92)
 
-    latest_event_file = latest_parquet(paths["event_firm_dir"])
-    latest_thread_file = latest_parquet(paths["thread_firm_dir"])
+    event_file = resolve_input_file(args.event_file, paths["event_firm_dir"], "event_firm_pairs")
+    thread_file = resolve_input_file(args.thread_file, paths["thread_firm_dir"], "thread_firm_pairs")
 
-    event_df = pd.read_parquet(latest_event_file)
-    thread_df = pd.read_parquet(latest_thread_file)
+    print("Using input files:")
+    print("EVENT :", event_file)
+    print("THREAD:", thread_file)
+    print()
 
-    post_text_map, comment_text_map = build_parent_lookup(event_df)
+    event_df = pd.read_parquet(event_file)
+    thread_df = pd.read_parquet(thread_file)
 
-    merge_cols = [
-        "post_id",
-        "canonical_name",
-        "thread_title",
-        "thread_text",
-        "llm_rationale",
-    ]
+    scored_df = prepare_scoring_df(event_df=event_df, thread_df=thread_df)
+    scored_df = apply_filters(scored_df, args)
 
-    scored_df = event_df.merge(
-        thread_df[merge_cols].drop_duplicates(subset=["post_id", "canonical_name"]),
-        on=["post_id", "canonical_name"],
-        how="left",
-    )
-
-    scored_df["parent_text"] = scored_df.apply(
-        lambda r: get_parent_text(r, post_text_map=post_text_map, comment_text_map=comment_text_map),
-        axis=1,
-    )
-
-    if args.limit is not None:
-        scored_df = scored_df.head(args.limit).copy()
-
-    out_cols = [
-        "parent_text",
-        "relevance_decision",
-        "relevance_confidence",
-        "relevance_reason",
-        "effective_relevance_decision",
-        "uncertain_adjudication_decision",
-        "uncertain_adjudication_confidence",
-        "uncertain_adjudication_reason",
-        "primary_a_sentiment",
-        "primary_a_confidence",
-        "primary_a_scum",
-        "primary_b_sentiment",
-        "primary_b_confidence",
-        "primary_b_scum",
-        "tiebreaker_sentiment",
-        "tiebreaker_confidence",
-        "tiebreaker_scum",
-        "tiebreaker_reason",
-        "final_sentiment",
-        "final_confidence",
-        "final_scum",
-        "solomon_triggered",
-    ]
-    for c in out_cols:
-        if c not in scored_df.columns:
-            scored_df[c] = None
+    print("Rows queued for scoring:", len(scored_df))
+    print("Source bucket counts:")
+    print(scored_df["source_bucket"].value_counts(dropna=False))
+    print()
+    print("Firm counts:")
+    print(scored_df["canonical_name"].value_counts(dropna=False).head(20))
+    print()
 
     rows_since_save = 0
 
@@ -689,12 +820,14 @@ def main():
         scored_df.at[idx, "relevance_decision"] = rel_decision
         scored_df.at[idx, "relevance_confidence"] = rel_conf
         scored_df.at[idx, "relevance_reason"] = rel_reason
+        if args.debug_save_raw:
+            scored_df.at[idx, "relevance_raw"] = relevance_text
 
         effective_rel = rel_decision
 
         if rel_decision == "DROP":
             scored_df.at[idx, "effective_relevance_decision"] = "DROP"
-            print(f"DROP: {row['event_id']} / {row['canonical_name']}")
+            print(f"DROP: {row['event_id']} / {row['canonical_name']} / {row['source_bucket']}")
             rows_since_save += 1
 
             if rows_since_save >= autosave_every:
@@ -725,6 +858,8 @@ def main():
             scored_df.at[idx, "uncertain_adjudication_decision"] = u_decision
             scored_df.at[idx, "uncertain_adjudication_confidence"] = u_conf
             scored_df.at[idx, "uncertain_adjudication_reason"] = u_reason
+            if args.debug_save_raw:
+                scored_df.at[idx, "uncertain_adjudication_raw"] = uncertain_text
 
             if u_decision == "KEEP" and u_conf is not None and u_conf >= uncertain_keep_threshold:
                 effective_rel = "KEEP"
@@ -732,7 +867,7 @@ def main():
                 effective_rel = "DROP"
                 scored_df.at[idx, "effective_relevance_decision"] = "DROP"
                 print(
-                    f"FLUSH_UNCERTAIN: {row['event_id']} / {row['canonical_name']} | "
+                    f"FLUSH_UNCERTAIN: {row['event_id']} / {row['canonical_name']} / {row['source_bucket']} | "
                     f"initial=UNCERTAIN | adjudicated={u_decision} @ {u_conf}"
                 )
                 rows_since_save += 1
@@ -785,10 +920,13 @@ def main():
         scored_df.at[idx, "primary_a_sentiment"] = a_s
         scored_df.at[idx, "primary_a_confidence"] = a_c
         scored_df.at[idx, "primary_a_scum"] = a_scum
-
         scored_df.at[idx, "primary_b_sentiment"] = b_s
         scored_df.at[idx, "primary_b_confidence"] = b_c
         scored_df.at[idx, "primary_b_scum"] = b_scum
+
+        if args.debug_save_raw:
+            scored_df.at[idx, "primary_a_raw"] = a_raw
+            scored_df.at[idx, "primary_b_raw"] = b_raw
 
         solomon = should_trigger_solomon(a_s, a_c, a_scum, b_s, b_c, b_scum, disagree_threshold)
         scored_df.at[idx, "solomon_triggered"] = solomon
@@ -808,7 +946,7 @@ def main():
             )
             tie_prompt = tiebreaker_prompt_template.format_map(tie_payload)
 
-            t_s, t_c, t_reason, _t_raw = call_and_parse_sentiment(
+            t_s, t_c, t_reason, t_raw = call_and_parse_sentiment(
                 model_name=tiebreaker_model,
                 prompt=tie_prompt,
                 anthropic_client=anthropic_client,
@@ -826,6 +964,9 @@ def main():
             scored_df.at[idx, "tiebreaker_confidence"] = t_c
             scored_df.at[idx, "tiebreaker_scum"] = t_scum
             scored_df.at[idx, "tiebreaker_reason"] = t_reason
+
+            if args.debug_save_raw:
+                scored_df.at[idx, "tiebreaker_raw"] = t_raw
 
             if not is_missing_score(t_s, t_c):
                 final_s = t_s
@@ -862,7 +1003,7 @@ def main():
         scored_df.at[idx, "final_scum"] = final_sc
 
         print(
-            f"{row['event_id']} | {row['canonical_name']} | "
+            f"{row['event_id']} | {row['canonical_name']} | source={row['source_bucket']} | "
             f"rel={effective_rel} | A={a_scum} | B={b_scum} | "
             f"solomon={solomon} | final={final_sc}"
         )
@@ -896,12 +1037,22 @@ def main():
     print("\nSaved:")
     print(outfile)
     print("\nCounts:")
-    print("Rows scored:", len(scored_df))
+    print("Rows queued:", len(scored_df))
     print("Initial KEEP rows:", initial_keep)
     print("Initial UNCERTAIN rows:", initial_uncertain)
     print("Uncertain rescued:", rescued_uncertain)
     print("Final scored rows:", final_scored)
     print("Solomon triggered:", solomon_count)
+
+    print("\nSource bucket counts:")
+    print(scored_df["source_bucket"].value_counts(dropna=False))
+
+    print("\nFinal scored by source bucket:")
+    print(
+        scored_df.groupby("source_bucket")["final_scum"]
+        .apply(lambda s: s.notna().sum())
+        .sort_values(ascending=False)
+    )
 
 
 if __name__ == "__main__":
