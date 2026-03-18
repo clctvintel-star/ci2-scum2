@@ -16,7 +16,7 @@ from utils import load_configs, load_env, ensure_dir, load_prompt
 # =========================================================
 # "full" = rebuild thread_firm_pairs with LLM + rebuild event_firm_pairs
 # "rebuild_events_from_existing_threads" = skip LLM, load existing thread_firm_pairs, rebuild only event_firm_pairs
-RUN_MODE = "rebuild_events_from_existing_threads"
+RUN_MODE = "full"
 
 # If RUN_MODE == "rebuild_events_from_existing_threads":
 # - if this is None, the script will auto-pick the latest thread_firm_pairs_*.parquet
@@ -33,6 +33,10 @@ LLM_RETRY_SLEEP_SECONDS = 1
 
 # If True, forces lowercase mention_type normalization and strips weird variants
 NORMALIZE_MENTION_TYPES = True
+
+# If True, risky-alias regex hits require LLM confirmation at thread level
+REQUIRE_LLM_CONFIRMATION_FOR_RISKY_REGEX_ONLY = True
+
 
 # =========================================================
 # CONSTANTS
@@ -109,6 +113,12 @@ def safe_float(value):
         return None
 
 
+def safe_str(value) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
 def build_alias_patterns(firms_config) -> List[Dict]:
     patterns = []
 
@@ -119,11 +129,13 @@ def build_alias_patterns(firms_config) -> List[Dict]:
 
         compiled = []
         for alias in aliases:
-            alias_clean = str(alias).strip()
+            alias_clean = safe_str(alias)
             if not alias_clean:
                 continue
 
-            if alias_clean.lower() in risky_aliases or len(alias_clean) <= 3:
+            is_risky = alias_clean.lower() in risky_aliases
+
+            if is_risky or len(alias_clean) <= 3:
                 pattern = re.compile(
                     rf"(?<!\w){re.escape(alias_clean)}(?!\w)",
                     flags=re.IGNORECASE,
@@ -134,7 +146,7 @@ def build_alias_patterns(firms_config) -> List[Dict]:
                     flags=re.IGNORECASE,
                 )
 
-            compiled.append((alias_clean, pattern))
+            compiled.append((alias_clean, pattern, is_risky))
 
         patterns.append({
             "canonical_name": canonical_name,
@@ -144,7 +156,7 @@ def build_alias_patterns(firms_config) -> List[Dict]:
     return patterns
 
 
-def build_alias_lookup(alias_patterns: List[Dict]) -> Dict[str, List[Tuple[str, re.Pattern]]]:
+def build_alias_lookup(alias_patterns: List[Dict]) -> Dict[str, List[Tuple[str, re.Pattern, bool]]]:
     return {
         x["canonical_name"]: x["patterns"]
         for x in alias_patterns
@@ -190,27 +202,37 @@ def regex_matches(text: str, alias_patterns: List[Dict]) -> List[Dict]:
         return matched
 
     for firm in alias_patterns:
-        firm_matches = []
+        all_aliases = []
+        risky_aliases = []
+        safe_aliases = []
 
-        for alias, pattern in firm["patterns"]:
+        for alias, pattern, is_risky in firm["patterns"]:
             if pattern.search(text):
-                firm_matches.append(alias)
+                all_aliases.append(alias)
+                if is_risky:
+                    risky_aliases.append(alias)
+                else:
+                    safe_aliases.append(alias)
 
-        if firm_matches:
+        if all_aliases:
             matched.append({
                 "canonical_name": firm["canonical_name"],
-                "matched_aliases": sorted(set(firm_matches)),
+                "matched_aliases": sorted(set(all_aliases)),
+                "matched_safe_aliases": sorted(set(safe_aliases)),
+                "matched_risky_aliases": sorted(set(risky_aliases)),
+                "has_non_risky_match": len(safe_aliases) > 0,
+                "has_risky_match": len(risky_aliases) > 0,
             })
 
     return matched
 
 
-def regex_matches_for_firm(text: str, firm_patterns: List[Tuple[str, re.Pattern]]) -> List[str]:
+def regex_matches_for_firm(text: str, firm_patterns: List[Tuple[str, re.Pattern, bool]]) -> List[str]:
     if not isinstance(text, str) or not text.strip():
         return []
 
     hits = []
-    for alias, pattern in firm_patterns:
+    for alias, pattern, _ in firm_patterns:
         if pattern.search(text):
             hits.append(alias)
 
@@ -255,11 +277,13 @@ def call_thread_detector(client, model_name: str, prompt: str):
     return []
 
 
-def build_detector_prompt(prompt_template: str,
-                          canonical_names: List[str],
-                          thread_title: str,
-                          thread_text: str,
-                          regex_candidates: List[str]) -> str:
+def build_detector_prompt(
+    prompt_template: str,
+    canonical_names: List[str],
+    thread_title: str,
+    thread_text: str,
+    regex_candidates: List[str],
+) -> str:
     return prompt_template.format(
         FIRM_UNIVERSE=json.dumps(canonical_names, ensure_ascii=False),
         REGEX_CANDIDATES=json.dumps(regex_candidates, ensure_ascii=False),
@@ -295,7 +319,6 @@ def normalize_llm_candidates(llm_output, allowed_names: List[str]) -> List[Dict]
             "llm_rationale": rationale,
         })
 
-    # Dedup by canonical_name, keep highest confidence if repeated
     if not rows:
         return rows
 
@@ -303,8 +326,8 @@ def normalize_llm_candidates(llm_output, allowed_names: List[str]) -> List[Dict]
     tmp["llm_confidence_sort"] = tmp["llm_confidence"].fillna(-1.0)
     tmp = (
         tmp.sort_values(["canonical_name", "llm_confidence_sort"], ascending=[True, False])
-           .drop_duplicates(subset=["canonical_name"], keep="first")
-           .drop(columns=["llm_confidence_sort"])
+        .drop_duplicates(subset=["canonical_name"], keep="first")
+        .drop(columns=["llm_confidence_sort"])
     )
     return tmp.to_dict(orient="records")
 
@@ -336,6 +359,31 @@ def validate_event_firm_df(df: pd.DataFrame) -> pd.DataFrame:
     df = df[EVENT_FIRM_REQUIRED_COLS].copy()
     df = df.drop_duplicates(subset=["event_id", "canonical_name"]).copy()
     return df
+
+
+def should_keep_thread_candidate(
+    canonical_name: str,
+    regex_info: Optional[Dict],
+    llm_info: Optional[Dict],
+) -> bool:
+    llm_confirmed = llm_info is not None
+    regex_present = regex_info is not None
+
+    if llm_confirmed:
+        return True
+
+    if not regex_present:
+        return False
+
+    has_non_risky_match = bool(regex_info.get("has_non_risky_match", False))
+
+    if has_non_risky_match:
+        return True
+
+    if REQUIRE_LLM_CONFIRMATION_FOR_RISKY_REGEX_ONLY:
+        return False
+
+    return True
 
 
 # =========================================================
@@ -370,8 +418,8 @@ def build_thread_firm_pairs(
         thread_text = build_thread_text(group)
 
         regex_hits = regex_matches(thread_text, alias_patterns)
-        regex_candidate_names = sorted([x["canonical_name"] for x in regex_hits])
-        regex_alias_map = {x["canonical_name"]: x["matched_aliases"] for x in regex_hits}
+        regex_alias_map = {x["canonical_name"]: x for x in regex_hits}
+        regex_candidate_names = sorted(regex_alias_map.keys())
 
         prompt = build_detector_prompt(
             detector_prompt,
@@ -387,20 +435,35 @@ def build_thread_firm_pairs(
             prompt=prompt,
         )
         llm_hits = normalize_llm_candidates(llm_output, canonical_names)
-        llm_candidate_names = sorted([x["canonical_name"] for x in llm_hits])
-
         llm_map = {x["canonical_name"]: x for x in llm_hits}
-        final_names = sorted(set(regex_candidate_names) | set(llm_map.keys()))
+        llm_candidate_names = sorted(llm_map.keys())
+
+        candidate_names_to_consider = sorted(set(regex_candidate_names) | set(llm_candidate_names))
+        final_names = []
+
+        for canonical_name in candidate_names_to_consider:
+            regex_info = regex_alias_map.get(canonical_name)
+            llm_info = llm_map.get(canonical_name)
+
+            if should_keep_thread_candidate(
+                canonical_name=canonical_name,
+                regex_info=regex_info,
+                llm_info=llm_info,
+            ):
+                final_names.append(canonical_name)
 
         for canonical_name in final_names:
-            regex_aliases = regex_alias_map.get(canonical_name, [])
+            regex_info = regex_alias_map.get(canonical_name, {})
             llm_info = llm_map.get(canonical_name, {})
+
+            matched_aliases = regex_info.get("matched_aliases", [])
+            thread_direct_match = bool(regex_info.get("has_non_risky_match", False) or llm_info)
 
             rows.append({
                 "post_id": post_id,
                 "canonical_name": canonical_name,
-                "matched_aliases": ", ".join(regex_aliases) if regex_aliases else None,
-                "thread_direct_match": canonical_name in regex_alias_map,
+                "matched_aliases": ", ".join(matched_aliases) if matched_aliases else None,
+                "thread_direct_match": thread_direct_match,
                 "thread_text": thread_text,
                 "thread_title": thread_title,
                 "subreddit": subreddit,
@@ -592,8 +655,6 @@ def main():
     thread_out = Path(paths["thread_firm_dir"]) / f"thread_firm_pairs_{ts}.parquet"
     event_out = Path(paths["event_firm_dir"]) / f"event_firm_pairs_{ts}.parquet"
 
-    # In rebuild_events mode, do not rewrite thread file unless you want a normalized copy
-    # But writing it is useful because it normalizes mention_type and schema.
     thread_firm_df = validate_thread_firm_df(thread_firm_df)
     event_firm_df = validate_event_firm_df(event_firm_df)
 
