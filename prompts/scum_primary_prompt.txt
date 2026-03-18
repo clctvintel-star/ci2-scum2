@@ -47,17 +47,26 @@ Scoring rules:
 - Do not default to 0.0 merely because the signal is mild.
 - Score the NET reputational effect when both positives and negatives appear.
 - Use smaller magnitudes for weak signals.
-- If the row is relevant but nondiagnostic, score it 0.0 with low confidence.
-- Do NOT abstain on relevant rows.
-- Return null only if the event is genuinely not about "{FUND_NAME}" even after using thread and parent context.
+
+Critical rule:
+If the event is relevant to "{FUND_NAME}", you MUST return a numeric sentiment score.
+
+Relevant but nondiagnostic events should usually be scored:
+
+sentiment = 0.0  
+confidence = low but greater than 0.0
+
+Return null ONLY if the event is genuinely unrelated to "{FUND_NAME}" even after using thread and parent context.
 
 Prestige-list caution:
 If the firm appears in a list of firms or employers, do not automatically assume strong positive sentiment.
+
 Treat such cases as:
 - mild positive if prestige is clearly implied
 - neutral (0.0) if it is merely factual inclusion
 
 Confidence guidance:
+
 High confidence
 - explicit firm-specific reputational statement
 
