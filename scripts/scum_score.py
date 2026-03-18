@@ -262,10 +262,9 @@ def parse_sentiment_response(text: Any) -> Tuple[Optional[float], Optional[float
     confidence = clamp_float(confidence, 0.0, 1.0)
     explanation = safe_text(explanation) or None
 
-    # Convert abstention -> neutral, not missing.
     if sentiment is None and confidence == 0.0:
         sentiment = 0.0
-        confidence = 0.05
+        confidence = 0.10
         return sentiment, confidence, explanation, "neutralized_abstention"
 
     if sentiment is None or confidence is None:
@@ -578,6 +577,7 @@ def build_format_payload(
         "EVENT_TEXT": safe_text(row.get("event_text")),
         "THREAD_TEXT": safe_text(row.get("thread_text")),
         "THREAD_TITLE": safe_text(row.get("thread_title")),
+        "PARENT_TEXT": safe_text(row.get("parent_text")),
         "MODEL_A_SENTIMENT": "" if model_a_sentiment is None else model_a_sentiment,
         "MODEL_A_CONFIDENCE": "" if model_a_confidence is None else model_a_confidence,
         "MODEL_B_SENTIMENT": "" if model_b_sentiment is None else model_b_sentiment,
@@ -673,8 +673,8 @@ def apply_filters(df: pd.DataFrame, args) -> pd.DataFrame:
     if args.sample_per_firm is not None:
         out = (
             out.groupby("canonical_name", group_keys=False)
-               .head(args.sample_per_firm)
-               .copy()
+               .apply(lambda x: x.sample(n=min(len(x), args.sample_per_firm), random_state=42))
+               .reset_index(drop=True)
         )
 
     if args.limit is not None:
@@ -764,9 +764,6 @@ def main():
         title_rescue = should_rescue_by_thread_title(row)
         df.at[idx, "title_inheritance_rescue"] = bool(title_rescue)
 
-        # -------------------------
-        # heuristic prefilter
-        # -------------------------
         if not args.disable_heuristic_prefilter:
             pre_decision, pre_conf, pre_reason, pre_source = heuristic_prefilter(row)
 
@@ -791,9 +788,6 @@ def main():
                     rows_since_save = 0
                 continue
 
-        # -------------------------
-        # cheap LLM prefilter
-        # -------------------------
         if relevance_prompt and not args.disable_llm_prefilter:
             relevance_text = relevance_prompt.format_map(payload)
             r_decision, r_conf, r_reason, r_raw = call_and_parse_relevance(
@@ -849,9 +843,6 @@ def main():
                         rows_since_save = 0
                     continue
 
-        # -------------------------
-        # primary scoring (ALWAYS BOTH)
-        # -------------------------
         prompt = primary_prompt.format_map(payload)
 
         a_s, a_c, a_reason, a_raw, a_status = call_and_parse_sentiment(
@@ -914,7 +905,6 @@ def main():
         a_valid = is_valid_score(a_s, a_c)
         b_valid = is_valid_score(b_s, b_c)
 
-        # Hard rule: no single-primary final scoring.
         if not (a_valid and b_valid):
             df.at[idx, "solomon_triggered"] = False
             df.at[idx, "final_sentiment"] = None
@@ -1045,8 +1035,7 @@ def main():
 
     if "title_inheritance_rescue" in df.columns:
         print("\nTitle inheritance rescues:")
-        rescue_series = df["title_inheritance_rescue"]
-        rescue_series = rescue_series.astype("boolean")
+        rescue_series = df["title_inheritance_rescue"].astype("boolean")
         print(rescue_series.value_counts(dropna=False))
 
     print("\nPrimary validity:")
