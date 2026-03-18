@@ -35,12 +35,12 @@ Each object must contain:
 - rationale
 
 Example object:
-{
+{{
   "canonical_name": "Citadel",
   "mention_type": "explicit",
   "confidence": 0.98,
   "rationale": "Firm name appears directly in the thread text."
-}
+}}
 
 Title:
 {THREAD_TITLE}
