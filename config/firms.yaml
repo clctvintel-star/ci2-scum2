@@ -4,9 +4,12 @@ firms:
       - Citadel
       - Citadel LLC
       - Ken Griffin
+      - Citadel Securities
+      - CitSec
       - Cit
     risky_aliases:
       - Cit
+      - Ken Griffin
 
   - canonical_name: Millennium
     aliases:
@@ -17,6 +20,7 @@ firms:
     risky_aliases:
       - Millennium
       - Mil
+      - Izzy Englander
 
   - canonical_name: Point72
     aliases:
@@ -24,7 +28,8 @@ firms:
       - Point 72
       - Steve Cohen
       - P72
-    risky_aliases: []
+    risky_aliases:
+      - Steve Cohen
 
   - canonical_name: D.E. Shaw
     aliases:
@@ -90,4 +95,5 @@ firms:
     aliases:
       - Schonfeld
       - Schonfeld Strategic Advisors
-    risky_aliases: []
+    risky_aliases:
+      -SSA
