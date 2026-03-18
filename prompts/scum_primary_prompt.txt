@@ -4,79 +4,82 @@ Task:
 Evaluate how this specific EVENT TEXT affects the perceived reputation of "{FUND_NAME}" from the perspective of a potential job applicant.
 
 Core rule:
-Your job is to decide the reputational effect of THIS EVENT on "{FUND_NAME}".
 The EVENT TEXT is the primary unit of analysis.
-Use THREAD TITLE, THREAD TEXT, and PARENT TEXT only to resolve reference, subjecthood, shorthand, aliases, pronouns, implicit comparison, sarcasm, or inherited context.
+
+Use THREAD TITLE, THREAD TEXT, and PARENT TEXT only to resolve:
+- shorthand
+- aliases
+- pronouns
+- sarcasm
+- comparisons
+- inherited context
+
+Do NOT score the whole thread.
 
 Scope rules:
 - Score sentiment ABOUT "{FUND_NAME}" only.
-- Do NOT score the whole thread.
 - Do NOT score other firms unless comparison clearly changes perception of "{FUND_NAME}".
-- A context row may still be relevant even if the local EVENT TEXT does not repeat the firm name, as long as the broader thread context clearly establishes that the event is part of a discussion about "{FUND_NAME}".
-- Do NOT require the firm name to reappear in the EVENT TEXT if THREAD TITLE, THREAD TEXT, or PARENT TEXT makes the reference clear.
+- A context row may still be relevant even if the EVENT TEXT does not repeat the firm name, if the broader thread clearly establishes the subject.
 
 Job-seeker framing:
-Signals that matter include prestige, compensation, performance, culture, working conditions, hiring difficulty, selectivity, elite status, exits, stability, layoffs, burnout, toxicity, training quality, internal mobility, return offers, turnover, politics, and whether a strong candidate would want to work there.
-
-How to think about relevance:
-The event is RELEVANT if a reasonable job applicant would treat it as information about "{FUND_NAME}".
-Examples of relevant cases:
-- explicit mention of the firm
-- shorthand or alias resolved by thread context
-- comparison between "{FUND_NAME}" and another firm
-- follow-up comments that clearly discuss an earlier firm-specific claim
-- questions about tradeoffs, pros/cons, comp, prestige, turnover, or return offers where the firm is established in the surrounding context
-
-The event is NOT relevant only if it truly provides no usable information about "{FUND_NAME}" even after using the surrounding context.
+Signals that matter include:
+- prestige
+- compensation
+- performance
+- culture
+- hiring difficulty
+- selectivity
+- elite status
+- exits
+- stability
+- layoffs
+- burnout
+- toxicity
+- training quality
+- internal mobility
+- return offers
+- turnover
+- politics
+- desirability as an employer
 
 Scoring rules:
-- Use a directional score whenever the event creates a directional reputational effect.
+- Use a directional score when the event has a directional reputational effect.
 - Do not default to 0.0 merely because the signal is mild.
-- Do not default to 0.0 merely because the event contains both positives and negatives; score the net reputational effect.
-- Use 0.0 when the event is genuinely neutral, balanced, ambiguous, or reputationally meaningful but directionless.
-- If the row is relevant to "{FUND_NAME}" but does not contain a meaningful positive or negative reputational signal, return 0.0, not null.
-- Return null only if the event is genuinely not about "{FUND_NAME}" after considering THREAD TITLE, THREAD TEXT, and PARENT TEXT.
+- Score the NET reputational effect when both positives and negatives appear.
+- Use smaller magnitudes for weak signals.
+- If the row is relevant but nondiagnostic, score it 0.0 with low confidence.
+- Do NOT abstain on relevant rows.
+- Return null only if the event is genuinely not about "{FUND_NAME}" even after using thread and parent context.
 
-Important anti-abstention rule:
-If the event is pertinent to "{FUND_NAME}" but reputationally weak, procedural, mixed, or mostly informational, you must still score it.
-In such cases, usually return:
-- sentiment = 0.0
-- low confidence, but greater than 0.0
-Do NOT return null for relevant-but-neutral rows.
-
-Context inheritance rule:
-For context rows, inherited meaning matters.
-A short comment such as a follow-up question, reaction, or tradeoff discussion may still be about "{FUND_NAME}" if the thread title, parent text, or thread body makes that clear.
-If the broader discussion is clearly firm-specific, score the local event in that inherited context.
-
-Examples:
-- Relevant but neutral -> sentiment 0.0, confidence > 0
-- Relevant and weakly positive -> small positive score
-- Relevant and weakly negative -> small negative score
-- Not actually about the firm -> sentiment null, confidence 0.0
-
-Directional guidance:
-- Positive examples: prestige, strong pay, elite status, good exits, strong performance, desirability, difficult-to-get offers, respected brand, good learning environment
-- Negative examples: no return offer, bad culture, burnout, layoffs, instability, toxic politics, high turnover, poor treatment, weak comp versus peers, bad exits, reputational embarrassment
-- Neutral examples: factual mention with no real reputational implication, genuinely balanced tradeoff, procedural question with no directional implication, relevant but non-diagnostic mention
+Prestige-list caution:
+If the firm appears in a list of firms or employers, do not automatically assume strong positive sentiment.
+Treat such cases as:
+- mild positive if prestige is clearly implied
+- neutral (0.0) if it is merely factual inclusion
 
 Confidence guidance:
-- High confidence = explicit, firm-specific, clear reputational signal
-- Medium confidence = indirect but still clearly attributable to the firm from context
-- Low confidence = weak but real signal, or inherited-context interpretation
-- Confidence must be 0 only if the event is unrelated to the firm
+High confidence
+- explicit firm-specific reputational statement
 
-Output rules:
+Medium confidence
+- indirect but clear signal from context
+
+Low confidence
+- weak but real signal
+
+Confidence must be 0 only if the event is unrelated to the firm.
+
 Return valid JSON only.
 No markdown fences.
 No extra text.
+
 Return exactly this object shape:
 
-{{
+{
   "sentiment": <number from -1.0 to 1.0 or null>,
   "confidence": <number from 0.0 to 1.0>,
   "explanation": "<brief explanation>"
-}}
+}
 
 Firm: {FUND_NAME}
 Matched aliases: {MATCHED_ALIASES}
