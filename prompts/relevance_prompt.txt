@@ -23,7 +23,7 @@ Do NOT include firms that are merely possible guesses, speculative mentions, or 
 
 A firm should NOT be included if:
 - it appears only in a hypothetical list unrelated to the thread discussion
-- the reference could plausibly refer to multiple firms
+- the reference could plausibly refer to multiple firms or to a non-firm meaning
 - the context does not clearly tie the reference to the firm
 
 Return ONLY a JSON array.
