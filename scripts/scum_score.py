@@ -77,6 +77,41 @@ def current_utc_stamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
 
+def normalize_for_contains(text: Any) -> str:
+    text = safe_text(text).lower()
+    text = re.sub(r"[^a-z0-9\s]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return f" {text} " if text else " "
+
+
+def text_contains_firm_name(text: Any, firm_name: Any) -> bool:
+    """
+    Conservative canonical-name containment check for inheritance rescue.
+    This is intentionally simple and only uses canonical_name, not aliases.
+    """
+    norm_text = normalize_for_contains(text)
+    norm_firm = normalize_for_contains(firm_name).strip()
+    if not norm_firm:
+        return False
+    return f" {norm_firm} " in norm_text
+
+
+def should_rescue_by_thread_title(row: pd.Series) -> bool:
+    """
+    For context rows only:
+    if the canonical firm name appears in the thread title, do not allow
+    prefilter to drop the row just because the local event text omits the name.
+    """
+    source_bucket = safe_text(row.get("source_bucket")).lower()
+    if source_bucket != "context":
+        return False
+
+    firm_name = row.get("canonical_name")
+    thread_title = row.get("thread_title")
+
+    return text_contains_firm_name(thread_title, firm_name)
+
+
 class SafeDict(dict):
     def __missing__(self, key):
         return "{" + key + "}"
@@ -581,6 +616,8 @@ def prepare_scoring_df(event_df: pd.DataFrame, thread_df: pd.DataFrame) -> pd.Da
     df["source_bucket"] = df["candidate_source"].apply(normalize_source_bucket)
 
     out_cols = [
+        "title_inheritance_rescue",
+
         "prefilter_decision",
         "prefilter_confidence",
         "prefilter_reason",
@@ -723,6 +760,9 @@ def main():
         event_key = row.get("event_id", idx)
         payload = build_format_payload(row)
 
+        title_rescue = should_rescue_by_thread_title(row)
+        df.at[idx, "title_inheritance_rescue"] = bool(title_rescue)
+
         # -------------------------
         # heuristic prefilter
         # -------------------------
@@ -764,30 +804,50 @@ def main():
                 retry_limit=retry_limit,
             )
 
-            df.at[idx, "prefilter_decision"] = r_decision
-            df.at[idx, "prefilter_confidence"] = r_conf
-            df.at[idx, "prefilter_reason"] = r_reason
-            df.at[idx, "prefilter_source"] = "llm_relevance"
+            # rescue context rows when the thread title clearly names the firm
+            if r_decision == "DROP" and title_rescue:
+                df.at[idx, "prefilter_decision"] = "KEEP"
+                df.at[idx, "prefilter_confidence"] = r_conf
+                df.at[idx, "prefilter_reason"] = (
+                    f"Rescued from DROP because canonical_name appears in thread_title. "
+                    f"Original prefilter reason: {safe_text(r_reason)}"
+                )
+                df.at[idx, "prefilter_source"] = "llm_relevance_title_rescue"
 
-            if args.debug_save_raw:
-                df.at[idx, "prefilter_raw"] = r_raw
-
-            if r_decision == "DROP":
-                df.at[idx, "final_reason"] = r_reason
-                df.at[idx, "final_reason_source"] = "prefilter_drop"
+                if args.debug_save_raw:
+                    df.at[idx, "prefilter_raw"] = r_raw
 
                 print(
                     f"[{idx + 1}/{len(df)}] {event_key} | {row['canonical_name']} | "
-                    f"source={row['source_bucket']} | PREFILTER_DROP | "
+                    f"source={row['source_bucket']} | PREFILTER_RESCUE_TITLE | "
                     f"reason={short_reason(r_reason)}"
                 )
 
-                rows_since_save += 1
-                if rows_since_save >= autosave_every:
-                    outfile = autosave_df(df, paths["scored_events_dir"])
-                    print(f"AUTOSAVED: {outfile}")
-                    rows_since_save = 0
-                continue
+            else:
+                df.at[idx, "prefilter_decision"] = r_decision
+                df.at[idx, "prefilter_confidence"] = r_conf
+                df.at[idx, "prefilter_reason"] = r_reason
+                df.at[idx, "prefilter_source"] = "llm_relevance"
+
+                if args.debug_save_raw:
+                    df.at[idx, "prefilter_raw"] = r_raw
+
+                if r_decision == "DROP":
+                    df.at[idx, "final_reason"] = r_reason
+                    df.at[idx, "final_reason_source"] = "prefilter_drop"
+
+                    print(
+                        f"[{idx + 1}/{len(df)}] {event_key} | {row['canonical_name']} | "
+                        f"source={row['source_bucket']} | PREFILTER_DROP | "
+                        f"reason={short_reason(r_reason)}"
+                    )
+
+                    rows_since_save += 1
+                    if rows_since_save >= autosave_every:
+                        outfile = autosave_df(df, paths["scored_events_dir"])
+                        print(f"AUTOSAVED: {outfile}")
+                        rows_since_save = 0
+                    continue
 
         # -------------------------
         # primary scoring
@@ -947,6 +1007,10 @@ def main():
     if "prefilter_decision" in df.columns:
         print("\nPrefilter decisions:")
         print(df["prefilter_decision"].value_counts(dropna=False))
+
+    if "title_inheritance_rescue" in df.columns:
+        print("\nTitle inheritance rescues:")
+        print(pd.Series(df["title_inheritance_rescue"]).fillna(False).astype(bool).value_counts(dropna=False))
 
 
 if __name__ == "__main__":
