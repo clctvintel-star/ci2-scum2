@@ -1,25 +1,69 @@
-You are judging whether ONE specific Reddit event (a post or comment) is actually about "{FUND_NAME}" closely enough to justify firm-specific sentiment scoring.
+You are deciding whether ONE Reddit event should be scored for hedge fund reputation analysis.
 
 Task:
-Decide whether this EVENT TEXT itself is about "{FUND_NAME}", explicitly mentions "{FUND_NAME}", or clearly refers to "{FUND_NAME}" using thread context.
+Determine whether this specific EVENT TEXT provides usable reputation signal about "{FUND_NAME}" from the perspective of a potential job applicant.
 
-Important rules:
-- Focus on the EVENT TEXT first.
-- Use THREAD TITLE and THREAD TEXT only to resolve shorthand, aliases, pronouns, comparisons, or indirect references.
-- KEEP if the event directly names the firm or one of its aliases.
-- KEEP if the event does not directly name the firm but clearly refers to it through thread context.
-- KEEP if the event makes a comparison, recommendation, warning, ranking, compensation remark, culture remark, hiring remark, prestige remark, or performance remark that is clearly about "{FUND_NAME}".
-- DROP if the event is generic chatter, generic career advice, generic finance chatter, deleted/anonymized junk, or clearly about some other firm.
-- DROP if the firm appears elsewhere in the thread but this EVENT TEXT itself does not meaningfully refer to the firm.
-- Prefer DROP over UNCERTAIN.
-- Use UNCERTAIN only when the event may refer to the firm but the evidence is genuinely ambiguous even after using thread context.
+Important:
+- The EVENT TEXT is the primary unit of analysis.
+- Use THREAD TITLE, THREAD TEXT, and PARENT TEXT only to resolve aliases, pronouns, shorthand, sarcasm, inheritance, or indirect reference.
+- Do NOT require the firm name to appear inside EVENT TEXT if the surrounding context clearly establishes the firm.
+- Do NOT score the event yet. Only decide whether it should proceed to scoring.
 
-Do NOT score sentiment yet.
+Decision meanings:
+
+KEEP
+The event is relevant enough to score for "{FUND_NAME}", even if the eventual sentiment may be neutral (0.0).
+
+DROP
+The event is not actually about "{FUND_NAME}" or contains no interpretable firm-specific signal even after using thread and parent context.
+
+UNCERTAIN
+Borderline case where the row may be relevant, but the available context is still not clear enough.
+
+Important distinction:
+- KEEP means the row should proceed to sentiment scoring.
+- A KEEP row may still receive a final sentiment of 0.0.
+- Do NOT DROP a row merely because it is weak, procedural, mixed, or neutral.
+- DROP only when the event genuinely provides no usable information about "{FUND_NAME}".
+
+Job-seeker framing:
+A row is worth KEEPING if a reasonable job applicant could treat it as information about:
+- prestige
+- compensation
+- hiring difficulty
+- selectivity
+- culture
+- stability
+- layoffs
+- return offers
+- turnover
+- training
+- elite status
+- working conditions
+- career value
+- desirability as an employer
+
+Examples of KEEP:
+- explicit firm mention
+- alias resolved through thread context
+- comparison involving the firm
+- follow-up comment continuing a firm-specific discussion
+- question about comp, prestige, work conditions, or tradeoffs involving the firm
+- indirect context where the firm is clearly the subject of the exchange
+
+Examples of DROP:
+- generic finance chatter unrelated to the firm
+- Bloomberg terminal/tool chatter with no firm-specific implication
+- deleted/removed comments
+- extremely short junk with no interpretable meaning
+- rows that discuss another firm only
+- rows that mention finance generally but provide no signal about "{FUND_NAME}"
 
 Return exactly this format:
+
 Decision: KEEP or DROP or UNCERTAIN
 Confidence: <0.0 to 1.0>
-Reason: <one short sentence>
+Reason: <brief explanation>
 
 Firm: {FUND_NAME}
 Matched aliases: {MATCHED_ALIASES}
