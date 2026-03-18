@@ -85,10 +85,6 @@ def normalize_for_contains(text: Any) -> str:
 
 
 def text_contains_firm_name(text: Any, firm_name: Any) -> bool:
-    """
-    Conservative canonical-name containment check for inheritance rescue.
-    This is intentionally simple and only uses canonical_name, not aliases.
-    """
     norm_text = normalize_for_contains(text)
     norm_firm = normalize_for_contains(firm_name).strip()
     if not norm_firm:
@@ -97,11 +93,6 @@ def text_contains_firm_name(text: Any, firm_name: Any) -> bool:
 
 
 def should_rescue_by_thread_title(row: pd.Series) -> bool:
-    """
-    For context rows only:
-    if the canonical firm name appears in the thread title, do not allow
-    prefilter to drop the row just because the local event text omits the name.
-    """
     source_bucket = safe_text(row.get("source_bucket")).lower()
     if source_bucket != "context":
         return False
@@ -492,9 +483,16 @@ def call_and_parse_sentiment(
         if attempt > 0:
             effective_prompt = (
                 prompt
-                + "\n\nIMPORTANT: Return one complete valid JSON object only with keys "
-                  '"sentiment", "confidence", and "explanation". '
-                  "No markdown. No extra text."
+                + '\n\nIMPORTANT: Return exactly one JSON object.\n\n'
+                  'Format:\n'
+                  '{\n'
+                  ' "sentiment": number between -1 and 1 or null,\n'
+                  ' "confidence": number between 0 and 1 or null,\n'
+                  ' "explanation": "string"\n'
+                  '}\n\n'
+                  'No markdown.\n'
+                  'No extra text.\n'
+                  'No code fences.'
             )
 
         raw = call_model(
@@ -695,7 +693,6 @@ def heuristic_prefilter(row: pd.Series) -> Tuple[Optional[str], Optional[float],
     if text in {"[deleted]", "[removed]", "deleted", "removed"}:
         return "DROP", 1.0, f"Event text is {text}.", "heuristic"
 
-    # conservative short junk filter
     if len(text) < 12 or tok_n <= 2:
         return "DROP", 0.98, f"Event text too short for reputational scoring (len={len(text)}, tokens={tok_n}).", "heuristic"
 
@@ -804,7 +801,6 @@ def main():
                 retry_limit=retry_limit,
             )
 
-            # rescue context rows when the thread title clearly names the firm
             if r_decision == "DROP" and title_rescue:
                 df.at[idx, "prefilter_decision"] = "KEEP"
                 df.at[idx, "prefilter_confidence"] = r_conf
@@ -894,6 +890,19 @@ def main():
             df.at[idx, "primary_a_raw"] = a_raw
             df.at[idx, "primary_b_raw"] = b_raw
 
+        a_valid = is_valid_score(a_s, a_c)
+        b_valid = is_valid_score(b_s, b_c)
+
+        if not a_valid:
+            print("\n--- PRIMARY_A PARSE FAILURE ---")
+            print(a_raw)
+            print("--- END PRIMARY_A ---\n")
+
+        if not b_valid:
+            print("\n--- PRIMARY_B PARSE FAILURE ---")
+            print(b_raw)
+            print("--- END PRIMARY_B ---\n")
+
         solomon = should_trigger_solomon(a_s, a_c, a_sc, b_s, b_c, b_sc, disagree_threshold)
         df.at[idx, "solomon_triggered"] = solomon
 
@@ -902,9 +911,6 @@ def main():
         final_sc = None
         final_reason = None
         final_reason_source = "none"
-
-        a_valid = is_valid_score(a_s, a_c)
-        b_valid = is_valid_score(b_s, b_c)
 
         if a_valid and b_valid and solomon:
             tie_payload = build_format_payload(
@@ -955,19 +961,18 @@ def main():
             final_reason = f"A:{safe_text(a_reason)} | B:{safe_text(b_reason)}"
             final_reason_source = "primary_avg"
 
-        elif a_valid and not b_valid:
-            final_s = a_s
-            final_c = a_c
-            final_sc = a_sc
-            final_reason = a_reason
-            final_reason_source = "primary_a_only"
+        elif not a_valid or not b_valid:
+            final_s = None
+            final_c = None
+            final_sc = None
+            final_reason = "Primary scorer parse failure"
+            final_reason_source = "primary_failure"
 
-        elif b_valid and not a_valid:
-            final_s = b_s
-            final_c = b_c
-            final_sc = b_sc
-            final_reason = b_reason
-            final_reason_source = "primary_b_only"
+            print(
+                f"[{idx + 1}/{len(df)}] "
+                f"{event_key} | {row['canonical_name']} | source={row['source_bucket']} | "
+                f"PRIMARY FAILURE | A_valid={a_valid} | B_valid={b_valid}"
+            )
 
         else:
             final_s = None
@@ -1009,8 +1014,13 @@ def main():
         print(df["prefilter_decision"].value_counts(dropna=False))
 
     if "title_inheritance_rescue" in df.columns:
+        rescue_counts = pd.Series(df["title_inheritance_rescue"]).astype("boolean").fillna(False).value_counts(dropna=False)
         print("\nTitle inheritance rescues:")
-        print(pd.Series(df["title_inheritance_rescue"]).fillna(False).astype(bool).value_counts(dropna=False))
+        print(rescue_counts)
+
+    print("\nPrimary validity:")
+    print("A valid:", int((df["primary_a_sentiment"].notna() & df["primary_a_confidence"].notna()).sum()))
+    print("B valid:", int((df["primary_b_sentiment"].notna() & df["primary_b_confidence"].notna()).sum()))
 
 
 if __name__ == "__main__":
