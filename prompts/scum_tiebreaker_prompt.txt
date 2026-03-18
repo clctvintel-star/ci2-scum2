@@ -3,13 +3,51 @@ You are resolving disagreement between two model scores for ONE Reddit event inv
 Task:
 Determine the most accurate sentiment score for how this specific EVENT TEXT affects the perceived reputation of "{FUND_NAME}" from the perspective of a potential job applicant.
 
-Important:
-- Score sentiment ABOUT "{FUND_NAME}" only.
-- The EVENT TEXT is the primary unit of analysis.
-- Use THREAD TITLE and THREAD TEXT only to resolve shorthand, aliases, pronouns, sarcasm, comparisons, or indirect reference.
-- Do NOT score the whole thread.
-- Do NOT score other firms unless comparison clearly changes perception of "{FUND_NAME}".
-- If the event is not actually about "{FUND_NAME}", return sentiment = null and confidence = 0.
+The EVENT TEXT is the primary unit of analysis.
+
+Use THREAD TITLE, THREAD TEXT, and PARENT TEXT only to resolve:
+- shorthand
+- aliases
+- pronouns
+- sarcasm
+- comparisons
+- inherited context
+
+Do NOT score the entire thread.
+
+Score sentiment ABOUT "{FUND_NAME}" only.
+Do NOT score other firms unless comparison clearly changes perception of "{FUND_NAME}".
+
+Your role:
+Review the two model outputs and determine the most accurate interpretation of the reputational signal.
+You may:
+- choose model A
+- choose model B
+- synthesize a better final judgment
+
+Do NOT simply average the two scores mechanically.
+
+Critical rule:
+- If the event is relevant to "{FUND_NAME}", you must return a numeric sentiment score.
+- Relevant but nondiagnostic rows should usually return sentiment = 0.0 with confidence > 0.0.
+- Return null only if the event is genuinely not about "{FUND_NAME}" even after using thread and parent context.
+
+Magnitude guidance:
+- Use small values for weak signals.
+- Do not exaggerate mild prestige mentions into strong positive sentiment.
+- Do not exaggerate vague criticism into strong negative sentiment.
+
+Confidence guidance:
+High confidence
+- explicit firm-specific reputational signal
+
+Medium confidence
+- indirect but clear signal
+
+Low confidence
+- weak but still meaningful signal
+
+Confidence must be 0 only if the event is unrelated to the firm.
 
 Prior model outputs:
 Model A sentiment: {MODEL_A_SENTIMENT}
@@ -20,13 +58,14 @@ Model B confidence: {MODEL_B_CONFIDENCE}
 Return valid JSON only.
 No markdown fences.
 No extra text.
+
 Return exactly this object shape:
 
-{{
+{
   "sentiment": <number from -1.0 to 1.0 or null>,
   "confidence": <number from 0.0 to 1.0>,
   "explanation": "<brief explanation>"
-}}
+}
 
 Firm: {FUND_NAME}
 Matched aliases: {MATCHED_ALIASES}
