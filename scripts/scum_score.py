@@ -16,16 +16,8 @@ from utils import load_configs, load_env, ensure_dir
 
 
 # ==========================================================
-# helper
+# helper utils
 # ==========================================================
-
-def short_reason(txt: Any, n: int = 100) -> str:
-    txt = safe_text(txt)
-    if not txt:
-        return ""
-    txt = txt.replace("\n", " ")
-    return txt[:n] + ("..." if len(txt) > n else "")
-
 
 def safe_text(v: Any) -> str:
     if v is None:
@@ -33,6 +25,14 @@ def safe_text(v: Any) -> str:
     if isinstance(v, float) and pd.isna(v):
         return ""
     return str(v).strip()
+
+
+def short_reason(txt: Any, n: int = 120) -> str:
+    txt = safe_text(txt)
+    if not txt:
+        return ""
+    txt = txt.replace("\n", " ")
+    return txt[:n] + ("..." if len(txt) > n else "")
 
 
 def clamp_float(v: Any, lo: float, hi: float) -> Optional[float]:
@@ -61,6 +61,20 @@ def normalize_source_bucket(candidate_source: Any) -> str:
     if txt == "thread_context":
         return "context"
     return "unknown"
+
+
+def normalize_text_for_prefilter(text: Any) -> str:
+    text = safe_text(text).lower()
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def token_count(text: str) -> int:
+    return len(re.findall(r"\b\w+\b", safe_text(text)))
+
+
+def current_utc_stamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
 
 class SafeDict(dict):
@@ -93,6 +107,8 @@ def parse_args():
     parser.add_argument("--show-latest-files", action="store_true")
     parser.add_argument("--debug-primary-b", action="store_true")
     parser.add_argument("--debug-save-raw", action="store_true")
+    parser.add_argument("--disable-llm-prefilter", action="store_true")
+    parser.add_argument("--disable-heuristic-prefilter", action="store_true")
 
     return parser.parse_args()
 
@@ -123,8 +139,7 @@ def read_text(path: Path) -> str:
 
 
 def autosave_df(df: pd.DataFrame, outdir: str, prefix: str = "scored_events") -> Path:
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    outfile = Path(outdir) / f"{prefix}_{ts}.parquet"
+    outfile = Path(outdir) / f"{prefix}_{current_utc_stamp()}.parquet"
     df.to_parquet(outfile, index=False)
     return outfile
 
@@ -159,7 +174,6 @@ def coerce_incomplete_json(text: str) -> Optional[Dict[str, Any]]:
         return None
 
     payload: Dict[str, Any] = {}
-
     s = sent_match.group(1)
     c = conf_match.group(1)
 
@@ -227,6 +241,40 @@ def parse_sentiment_response(text: Any) -> Tuple[Optional[float], Optional[float
     return sentiment, confidence, explanation
 
 
+def parse_relevance_response(text: Any) -> Tuple[Optional[str], Optional[float], Optional[str]]:
+    if not isinstance(text, str):
+        return None, None, None
+
+    decision = None
+    confidence = None
+    reason = None
+
+    m = re.search(r"Decision:\s*(KEEP|DROP|UNCERTAIN)", text, flags=re.IGNORECASE)
+    if m:
+        decision = m.group(1).upper()
+
+    m = re.search(r"Confidence:\s*([0-9]*\.?[0-9]+)", text, flags=re.IGNORECASE)
+    if m:
+        confidence = clamp_float(m.group(1), 0.0, 1.0)
+
+    m = re.search(r"Reason:\s*(.+)", text, flags=re.IGNORECASE | re.DOTALL)
+    if m:
+        reason = m.group(1).strip()
+
+    if decision in {"KEEP", "DROP", "UNCERTAIN"}:
+        return decision, confidence, reason
+
+    payload = extract_json_payload(text)
+    if isinstance(payload, dict):
+        d = safe_text(payload.get("decision")).upper()
+        if d in {"KEEP", "DROP", "UNCERTAIN"}:
+            decision = d
+            confidence = clamp_float(payload.get("confidence"), 0.0, 1.0)
+            reason = safe_text(payload.get("reason") or payload.get("explanation") or payload.get("rationale")) or None
+
+    return decision, confidence, reason
+
+
 # ==========================================================
 # model selection logic
 # ==========================================================
@@ -244,7 +292,6 @@ def should_trigger_solomon(
     b_sc: Optional[float],
     thresh: float,
 ) -> bool:
-    # Only adjudicate when BOTH models produced valid scores.
     if not is_valid_score(a_s, a_c):
         return False
     if not is_valid_score(b_s, b_c):
@@ -361,20 +408,32 @@ def call_model(
 ) -> str:
     if model_name.startswith("claude"):
         return call_anthropic(
-            anthropic_client, model_name, prompt,
-            max_tokens=max_tokens, temperature=temperature, retry_limit=retry_limit
+            anthropic_client,
+            model_name,
+            prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            retry_limit=retry_limit,
         )
 
     if model_name.startswith("gpt"):
         return call_openai(
-            openai_client, model_name, prompt,
-            max_tokens=max_tokens, temperature=temperature, retry_limit=retry_limit
+            openai_client,
+            model_name,
+            prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            retry_limit=retry_limit,
         )
 
     if model_name.startswith("gemini"):
         return call_gemini(
-            gemini_client, model_name, prompt,
-            max_tokens=max_tokens, temperature=temperature, retry_limit=retry_limit
+            gemini_client,
+            model_name,
+            prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            retry_limit=retry_limit,
         )
 
     raise ValueError(f"Unsupported model family: {model_name}")
@@ -418,6 +477,49 @@ def call_and_parse_sentiment(
         sentiment, confidence, reason = parse_sentiment_response(raw)
         if confidence is not None:
             return sentiment, confidence, reason, raw
+
+    return None, None, None, last_raw
+
+
+def call_and_parse_relevance(
+    model_name: str,
+    prompt: str,
+    anthropic_client,
+    openai_client,
+    gemini_client,
+    max_tokens: int = 180,
+    temperature: float = 0.0,
+    retry_limit: int = 3,
+    semantic_retry_limit: int = 2,
+) -> Tuple[Optional[str], Optional[float], Optional[str], str]:
+    last_raw = ""
+
+    for attempt in range(semantic_retry_limit):
+        effective_prompt = prompt
+        if attempt > 0:
+            effective_prompt = (
+                prompt
+                + "\n\nIMPORTANT: Return only either:\n"
+                  "Decision: KEEP|DROP|UNCERTAIN\n"
+                  "Confidence: 0.0-1.0\n"
+                  "Reason: ...\n"
+            )
+
+        raw = call_model(
+            model_name=model_name,
+            prompt=effective_prompt,
+            anthropic_client=anthropic_client,
+            openai_client=openai_client,
+            gemini_client=gemini_client,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            retry_limit=retry_limit,
+        )
+
+        last_raw = raw
+        decision, confidence, reason = parse_relevance_response(raw)
+        if decision in {"KEEP", "DROP", "UNCERTAIN"}:
+            return decision, confidence, reason, raw
 
     return None, None, None, last_raw
 
@@ -479,6 +581,12 @@ def prepare_scoring_df(event_df: pd.DataFrame, thread_df: pd.DataFrame) -> pd.Da
     df["source_bucket"] = df["candidate_source"].apply(normalize_source_bucket)
 
     out_cols = [
+        "prefilter_decision",
+        "prefilter_confidence",
+        "prefilter_reason",
+        "prefilter_source",
+        "prefilter_raw",
+
         "primary_a_sentiment",
         "primary_a_confidence",
         "primary_a_scum",
@@ -537,6 +645,27 @@ def apply_filters(df: pd.DataFrame, args) -> pd.DataFrame:
 
 
 # ==========================================================
+# prefilter
+# ==========================================================
+
+def heuristic_prefilter(row: pd.Series) -> Tuple[Optional[str], Optional[float], Optional[str], str]:
+    text = normalize_text_for_prefilter(row.get("event_text"))
+    tok_n = token_count(text)
+
+    if not text:
+        return "DROP", 1.0, "Empty event text.", "heuristic"
+
+    if text in {"[deleted]", "[removed]", "deleted", "removed"}:
+        return "DROP", 1.0, f"Event text is {text}.", "heuristic"
+
+    # conservative short junk filter
+    if len(text) < 12 or tok_n <= 2:
+        return "DROP", 0.98, f"Event text too short for reputational scoring (len={len(text)}, tokens={tok_n}).", "heuristic"
+
+    return None, None, None, "heuristic"
+
+
+# ==========================================================
 # main
 # ==========================================================
 
@@ -555,6 +684,9 @@ def main():
 
     primary_prompt = read_text(Path("prompts/scum_primary_prompt.txt"))
     tie_prompt = read_text(Path("prompts/scum_tiebreaker_prompt.txt"))
+
+    relevance_prompt_path = Path("prompts/event_firm_relevance_prompt.txt")
+    relevance_prompt = read_text(relevance_prompt_path) if relevance_prompt_path.exists() else None
 
     event_file = resolve_input_file(args.event_file, paths["event_firm_dir"], "event_firm_pairs")
     thread_file = resolve_input_file(args.thread_file, paths["thread_firm_dir"], "thread_firm_pairs")
@@ -583,11 +715,83 @@ def main():
     primary_a_model = settings["models"]["score"]["primary_a"]
     primary_b_model = settings["models"]["score"]["primary_b"]
     tiebreaker_model = settings["models"]["score"]["tiebreaker"]
+    relevance_model = settings["models"]["score"].get("relevance_filter", primary_b_model)
 
     rows_since_save = 0
 
     for idx, row in df.iterrows():
+        event_key = row.get("event_id", idx)
         payload = build_format_payload(row)
+
+        # -------------------------
+        # heuristic prefilter
+        # -------------------------
+        if not args.disable_heuristic_prefilter:
+            pre_decision, pre_conf, pre_reason, pre_source = heuristic_prefilter(row)
+
+            if pre_decision == "DROP":
+                df.at[idx, "prefilter_decision"] = pre_decision
+                df.at[idx, "prefilter_confidence"] = pre_conf
+                df.at[idx, "prefilter_reason"] = pre_reason
+                df.at[idx, "prefilter_source"] = pre_source
+                df.at[idx, "final_reason"] = pre_reason
+                df.at[idx, "final_reason_source"] = "prefilter_drop"
+
+                print(
+                    f"[{idx + 1}/{len(df)}] {event_key} | {row['canonical_name']} | "
+                    f"source={row['source_bucket']} | PREFILTER_DROP | "
+                    f"reason={short_reason(pre_reason)}"
+                )
+
+                rows_since_save += 1
+                if rows_since_save >= autosave_every:
+                    outfile = autosave_df(df, paths["scored_events_dir"])
+                    print(f"AUTOSAVED: {outfile}")
+                    rows_since_save = 0
+                continue
+
+        # -------------------------
+        # cheap LLM prefilter
+        # -------------------------
+        if relevance_prompt and not args.disable_llm_prefilter:
+            relevance_text = relevance_prompt.format_map(payload)
+            r_decision, r_conf, r_reason, r_raw = call_and_parse_relevance(
+                relevance_model,
+                relevance_text,
+                anthropic_client,
+                openai_client,
+                gemini_client,
+                retry_limit=retry_limit,
+            )
+
+            df.at[idx, "prefilter_decision"] = r_decision
+            df.at[idx, "prefilter_confidence"] = r_conf
+            df.at[idx, "prefilter_reason"] = r_reason
+            df.at[idx, "prefilter_source"] = "llm_relevance"
+
+            if args.debug_save_raw:
+                df.at[idx, "prefilter_raw"] = r_raw
+
+            if r_decision == "DROP":
+                df.at[idx, "final_reason"] = r_reason
+                df.at[idx, "final_reason_source"] = "prefilter_drop"
+
+                print(
+                    f"[{idx + 1}/{len(df)}] {event_key} | {row['canonical_name']} | "
+                    f"source={row['source_bucket']} | PREFILTER_DROP | "
+                    f"reason={short_reason(r_reason)}"
+                )
+
+                rows_since_save += 1
+                if rows_since_save >= autosave_every:
+                    outfile = autosave_df(df, paths["scored_events_dir"])
+                    print(f"AUTOSAVED: {outfile}")
+                    rows_since_save = 0
+                continue
+
+        # -------------------------
+        # primary scoring
+        # -------------------------
         prompt = primary_prompt.format_map(payload)
 
         a_s, a_c, a_reason, a_raw = call_and_parse_sentiment(
@@ -718,8 +922,6 @@ def main():
         df.at[idx, "final_reason"] = final_reason
         df.at[idx, "final_reason_source"] = final_reason_source
 
-        event_key = row.get("event_id", idx)
-
         print(
             f"[{idx + 1}/{len(df)}] "
             f"{event_key} | {row['canonical_name']} | source={row['source_bucket']} | "
@@ -741,6 +943,10 @@ def main():
     print("\nFinal scored rows:", int(df["final_scum"].notna().sum()))
     print("\nFinal reason sources:")
     print(df["final_reason_source"].value_counts(dropna=False))
+
+    if "prefilter_decision" in df.columns:
+        print("\nPrefilter decisions:")
+        print(df["prefilter_decision"].value_counts(dropna=False))
 
 
 if __name__ == "__main__":
