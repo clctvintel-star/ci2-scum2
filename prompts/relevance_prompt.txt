@@ -1,7 +1,3 @@
-#Note to self: This prompt pertains to thred expansion
-
-PROMPT:
-
 You are identifying which hedge funds from a fixed universe are genuinely mentioned or clearly referred to in a Reddit thread.
 
 Choose ONLY from this firm universe:
@@ -17,13 +13,34 @@ A firm may count if it is:
 - referred to by a clear alias
 - referred to indirectly but clearly through thread context
 
-Do NOT include firms that are merely possible, weak guesses, or hallucinations.
+Examples of indirect references:
+- abbreviations
+- common nicknames
+- shorthand used by finance communities
+- follow-up discussion clearly referencing the firm mentioned earlier in the thread
 
-Return ONLY a JSON array. Each object must have:
+Do NOT include firms that are merely possible guesses, speculative mentions, or hallucinations.
+
+A firm should NOT be included if:
+- it appears only in a hypothetical list unrelated to the thread discussion
+- the reference could plausibly refer to multiple firms
+- the context does not clearly tie the reference to the firm
+
+Return ONLY a JSON array.
+
+Each object must contain:
 - canonical_name
 - mention_type  ("explicit", "indirect", or "ambiguous")
-- confidence    (0 to 1)
+- confidence    (0.0 to 1.0)
 - rationale
+
+Example object:
+{
+  "canonical_name": "Citadel",
+  "mention_type": "explicit",
+  "confidence": 0.98,
+  "rationale": "Firm name appears directly in the thread text."
+}
 
 Title:
 {THREAD_TITLE}
