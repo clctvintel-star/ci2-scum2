@@ -113,14 +113,23 @@ def parse_args():
 
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--firm", type=str, default=None)
-    parser.add_argument("--source-bucket", type=str, choices=["direct", "context"], default=None)
+
+    parser.add_argument(
+        "--source-bucket",
+        type=str,
+        choices=["direct", "context"],
+        default=None,
+    )
+
     parser.add_argument("--sample-per-firm", type=int, default=None)
 
     parser.add_argument("--event-file", type=str, default=None)
     parser.add_argument("--thread-file", type=str, default=None)
 
     parser.add_argument("--show-latest-files", action="store_true")
+    parser.add_argument("--debug-primary-a", action="store_true")
     parser.add_argument("--debug-primary-b", action="store_true")
+    parser.add_argument("--debug-tiebreaker", action="store_true")
     parser.add_argument("--debug-save-raw", action="store_true")
     parser.add_argument("--disable-llm-prefilter", action="store_true")
     parser.add_argument("--disable-heuristic-prefilter", action="store_true")
@@ -195,6 +204,7 @@ def coerce_incomplete_json(text: str) -> Optional[Dict[str, Any]]:
     payload["sentiment"] = None if s == "null" else float(s)
     payload["confidence"] = None if c == "null" else float(c)
     payload["explanation"] = expl_match.group(2).strip() if expl_match else None
+
     return payload
 
 
@@ -239,10 +249,10 @@ def extract_json_payload(text: Any) -> Optional[Dict[str, Any]]:
     return None
 
 
-def parse_sentiment_response(text: Any) -> Tuple[Optional[float], Optional[float], Optional[str]]:
+def parse_sentiment_response(text: Any) -> Tuple[Optional[float], Optional[float], Optional[str], str]:
     payload = extract_json_payload(text)
     if not payload:
-        return None, None, None
+        return None, None, None, "parse_failure"
 
     sentiment = payload.get("sentiment")
     confidence = payload.get("confidence")
@@ -251,7 +261,17 @@ def parse_sentiment_response(text: Any) -> Tuple[Optional[float], Optional[float
     sentiment = clamp_float(sentiment, -1.0, 1.0)
     confidence = clamp_float(confidence, 0.0, 1.0)
     explanation = safe_text(explanation) or None
-    return sentiment, confidence, explanation
+
+    # Convert abstention -> neutral, not missing.
+    if sentiment is None and confidence == 0.0:
+        sentiment = 0.0
+        confidence = 0.05
+        return sentiment, confidence, explanation, "neutralized_abstention"
+
+    if sentiment is None or confidence is None:
+        return None, None, explanation, "parse_failure"
+
+    return sentiment, confidence, explanation, "valid"
 
 
 def parse_relevance_response(text: Any) -> Tuple[Optional[str], Optional[float], Optional[str]]:
@@ -286,17 +306,6 @@ def parse_relevance_response(text: Any) -> Tuple[Optional[str], Optional[float],
             reason = safe_text(payload.get("reason") or payload.get("explanation") or payload.get("rationale")) or None
 
     return decision, confidence, reason
-
-
-def classify_model_status(sentiment: Optional[float], confidence: Optional[float], raw: str) -> str:
-    payload = extract_json_payload(raw)
-    if payload is None:
-        return "parse_failure"
-    if sentiment is None and confidence == 0.0:
-        return "abstention"
-    if sentiment is None or confidence is None:
-        return "invalid"
-    return "valid"
 
 
 # ==========================================================
@@ -432,19 +441,34 @@ def call_model(
 ) -> str:
     if model_name.startswith("claude"):
         return call_anthropic(
-            anthropic_client, model_name, prompt,
-            max_tokens=max_tokens, temperature=temperature, retry_limit=retry_limit
+            anthropic_client,
+            model_name,
+            prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            retry_limit=retry_limit,
         )
+
     if model_name.startswith("gpt"):
         return call_openai(
-            openai_client, model_name, prompt,
-            max_tokens=max_tokens, temperature=temperature, retry_limit=retry_limit
+            openai_client,
+            model_name,
+            prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            retry_limit=retry_limit,
         )
+
     if model_name.startswith("gemini"):
         return call_gemini(
-            gemini_client, model_name, prompt,
-            max_tokens=max_tokens, temperature=temperature, retry_limit=retry_limit
+            gemini_client,
+            model_name,
+            prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            retry_limit=retry_limit,
         )
+
     raise ValueError(f"Unsupported model family: {model_name}")
 
 
@@ -458,7 +482,7 @@ def call_and_parse_sentiment(
     temperature: float = 0.1,
     retry_limit: int = 3,
     semantic_retry_limit: int = 2,
-) -> Tuple[Optional[float], Optional[float], Optional[str], str]:
+) -> Tuple[Optional[float], Optional[float], Optional[str], str, str]:
     last_raw = ""
 
     for attempt in range(semantic_retry_limit):
@@ -466,16 +490,9 @@ def call_and_parse_sentiment(
         if attempt > 0:
             effective_prompt = (
                 prompt
-                + '\n\nIMPORTANT: Return exactly one JSON object.\n\n'
-                  'Format:\n'
-                  '{\n'
-                  ' "sentiment": number between -1 and 1 or null,\n'
-                  ' "confidence": number between 0 and 1 or null,\n'
-                  ' "explanation": "string"\n'
-                  '}\n\n'
-                  'No markdown.\n'
-                  'No extra text.\n'
-                  'No code fences.'
+                + "\n\nIMPORTANT: Return one complete valid JSON object only with keys "
+                  '"sentiment", "confidence", and "explanation". '
+                  "No markdown. No extra text."
             )
 
         raw = call_model(
@@ -490,13 +507,12 @@ def call_and_parse_sentiment(
         )
 
         last_raw = raw
-        sentiment, confidence, reason = parse_sentiment_response(raw)
-        payload = extract_json_payload(raw)
+        sentiment, confidence, reason, status = parse_sentiment_response(raw)
 
-        if payload is not None:
-            return sentiment, confidence, reason, raw
+        if status in {"valid", "neutralized_abstention"}:
+            return sentiment, confidence, reason, raw, status
 
-    return None, None, None, last_raw
+    return None, None, None, last_raw, "parse_failure"
 
 
 def call_and_parse_relevance(
@@ -623,6 +639,7 @@ def prepare_scoring_df(event_df: pd.DataFrame, thread_df: pd.DataFrame) -> pd.Da
         "tiebreaker_confidence",
         "tiebreaker_scum",
         "tiebreaker_reason",
+        "tiebreaker_status",
 
         "final_sentiment",
         "final_confidence",
@@ -654,7 +671,11 @@ def apply_filters(df: pd.DataFrame, args) -> pd.DataFrame:
         out = out[out["source_bucket"] == args.source_bucket].copy()
 
     if args.sample_per_firm is not None:
-        out = out.groupby("canonical_name", group_keys=False).head(args.sample_per_firm).copy()
+        out = (
+            out.groupby("canonical_name", group_keys=False)
+               .head(args.sample_per_firm)
+               .copy()
+        )
 
     if args.limit is not None:
         out = out.head(args.limit).copy()
@@ -719,9 +740,11 @@ def main():
     print("THREAD:", thread_file)
     print()
     print("Rows queued:", len(df))
-    print("Source bucket counts:")
-    print(df["source_bucket"].value_counts(dropna=False))
-    print()
+
+    if "source_bucket" in df.columns:
+        print("Source bucket counts:")
+        print(df["source_bucket"].value_counts(dropna=False))
+        print()
 
     retry_limit = settings.get("scoring", {}).get("retry_limit", 3)
     disagree_threshold = settings.get("scoring", {}).get("disagree_threshold", 0.2)
@@ -741,8 +764,12 @@ def main():
         title_rescue = should_rescue_by_thread_title(row)
         df.at[idx, "title_inheritance_rescue"] = bool(title_rescue)
 
+        # -------------------------
+        # heuristic prefilter
+        # -------------------------
         if not args.disable_heuristic_prefilter:
             pre_decision, pre_conf, pre_reason, pre_source = heuristic_prefilter(row)
+
             if pre_decision == "DROP":
                 df.at[idx, "prefilter_decision"] = pre_decision
                 df.at[idx, "prefilter_confidence"] = pre_conf
@@ -753,7 +780,8 @@ def main():
 
                 print(
                     f"[{idx + 1}/{len(df)}] {event_key} | {row['canonical_name']} | "
-                    f"source={row['source_bucket']} | PREFILTER_DROP | reason={short_reason(pre_reason)}"
+                    f"source={row['source_bucket']} | PREFILTER_DROP | "
+                    f"reason={short_reason(pre_reason)}"
                 )
 
                 rows_since_save += 1
@@ -763,6 +791,9 @@ def main():
                     rows_since_save = 0
                 continue
 
+        # -------------------------
+        # cheap LLM prefilter
+        # -------------------------
         if relevance_prompt and not args.disable_llm_prefilter:
             relevance_text = relevance_prompt.format_map(payload)
             r_decision, r_conf, r_reason, r_raw = call_and_parse_relevance(
@@ -778,22 +809,26 @@ def main():
                 df.at[idx, "prefilter_decision"] = "KEEP"
                 df.at[idx, "prefilter_confidence"] = r_conf
                 df.at[idx, "prefilter_reason"] = (
-                    "Rescued from DROP because canonical_name appears in thread_title. "
+                    f"Rescued from DROP because canonical_name appears in thread_title. "
                     f"Original prefilter reason: {safe_text(r_reason)}"
                 )
                 df.at[idx, "prefilter_source"] = "llm_relevance_title_rescue"
+
                 if args.debug_save_raw:
                     df.at[idx, "prefilter_raw"] = r_raw
 
                 print(
                     f"[{idx + 1}/{len(df)}] {event_key} | {row['canonical_name']} | "
-                    f"source={row['source_bucket']} | PREFILTER_RESCUE_TITLE | reason={short_reason(r_reason)}"
+                    f"source={row['source_bucket']} | PREFILTER_RESCUE_TITLE | "
+                    f"reason={short_reason(r_reason)}"
                 )
+
             else:
                 df.at[idx, "prefilter_decision"] = r_decision
                 df.at[idx, "prefilter_confidence"] = r_conf
                 df.at[idx, "prefilter_reason"] = r_reason
                 df.at[idx, "prefilter_source"] = "llm_relevance"
+
                 if args.debug_save_raw:
                     df.at[idx, "prefilter_raw"] = r_raw
 
@@ -803,7 +838,8 @@ def main():
 
                     print(
                         f"[{idx + 1}/{len(df)}] {event_key} | {row['canonical_name']} | "
-                        f"source={row['source_bucket']} | PREFILTER_DROP | reason={short_reason(r_reason)}"
+                        f"source={row['source_bucket']} | PREFILTER_DROP | "
+                        f"reason={short_reason(r_reason)}"
                     )
 
                     rows_since_save += 1
@@ -813,9 +849,12 @@ def main():
                         rows_since_save = 0
                     continue
 
+        # -------------------------
+        # primary scoring (ALWAYS BOTH)
+        # -------------------------
         prompt = primary_prompt.format_map(payload)
 
-        a_s, a_c, a_reason, a_raw = call_and_parse_sentiment(
+        a_s, a_c, a_reason, a_raw, a_status = call_and_parse_sentiment(
             primary_a_model,
             prompt,
             anthropic_client,
@@ -823,7 +862,8 @@ def main():
             gemini_client,
             retry_limit=retry_limit,
         )
-        b_s, b_c, b_reason, b_raw = call_and_parse_sentiment(
+
+        b_s, b_c, b_reason, b_raw, b_status = call_and_parse_sentiment(
             primary_b_model,
             prompt,
             anthropic_client,
@@ -832,13 +872,25 @@ def main():
             retry_limit=retry_limit,
         )
 
+        if args.debug_primary_a:
+            print("\n--- PRIMARY_A RAW OUTPUT ---")
+            print(a_raw)
+            print("--- END PRIMARY_A RAW OUTPUT ---\n")
+
         if args.debug_primary_b:
             print("\n--- PRIMARY_B RAW OUTPUT ---")
             print(b_raw)
             print("--- END PRIMARY_B RAW OUTPUT ---\n")
 
-        a_status = classify_model_status(a_s, a_c, a_raw)
-        b_status = classify_model_status(b_s, b_c, b_raw)
+        if a_status == "neutralized_abstention":
+            print("\n--- PRIMARY_A ABSTENTION NORMALIZED TO NEUTRAL ---")
+            print(a_raw)
+            print("--- END PRIMARY_A ---\n")
+
+        if b_status == "neutralized_abstention":
+            print("\n--- PRIMARY_B ABSTENTION NORMALIZED TO NEUTRAL ---")
+            print(b_raw)
+            print("--- END PRIMARY_B ---\n")
 
         a_sc = scum_score(a_s, a_c)
         b_sc = scum_score(b_s, b_c)
@@ -862,23 +914,39 @@ def main():
         a_valid = is_valid_score(a_s, a_c)
         b_valid = is_valid_score(b_s, b_c)
 
-        if a_status == "parse_failure":
-            print("\n--- PRIMARY_A PARSE FAILURE ---")
-            print(a_raw)
-            print("--- END PRIMARY_A ---\n")
-        elif a_status == "abstention":
-            print("\n--- PRIMARY_A ABSTENTION ---")
-            print(a_raw)
-            print("--- END PRIMARY_A ---\n")
+        # Hard rule: no single-primary final scoring.
+        if not (a_valid and b_valid):
+            df.at[idx, "solomon_triggered"] = False
+            df.at[idx, "final_sentiment"] = None
+            df.at[idx, "final_confidence"] = None
+            df.at[idx, "final_scum"] = None
+            df.at[idx, "final_reason"] = (
+                f"Primary failure. A_status={a_status}, B_status={b_status}. "
+                f"A_reason={safe_text(a_reason)} | B_reason={safe_text(b_reason)}"
+            )
+            df.at[idx, "final_reason_source"] = "primary_failure"
 
-        if b_status == "parse_failure":
-            print("\n--- PRIMARY_B PARSE FAILURE ---")
-            print(b_raw)
-            print("--- END PRIMARY_B ---\n")
-        elif b_status == "abstention":
-            print("\n--- PRIMARY_B ABSTENTION ---")
-            print(b_raw)
-            print("--- END PRIMARY_B ---\n")
+            print(
+                f"[{idx + 1}/{len(df)}] {event_key} | {row['canonical_name']} | "
+                f"source={row['source_bucket']} | PRIMARY FAILURE | "
+                f"A_status={a_status} | B_status={b_status}"
+            )
+
+            print(
+                f"[{idx + 1}/{len(df)}] "
+                f"{event_key} | {row['canonical_name']} | source={row['source_bucket']} | "
+                f"A={a_sc} | B={b_sc} | solomon=False | final=None | "
+                f"final_source=primary_failure | "
+                f"A_reason={short_reason(a_reason)} | "
+                f"B_reason={short_reason(b_reason)}"
+            )
+
+            rows_since_save += 1
+            if rows_since_save >= autosave_every:
+                outfile = autosave_df(df, paths["scored_events_dir"])
+                print(f"AUTOSAVED: {outfile}")
+                rows_since_save = 0
+            continue
 
         solomon = should_trigger_solomon(a_s, a_c, a_sc, b_s, b_c, b_sc, disagree_threshold)
         df.at[idx, "solomon_triggered"] = solomon
@@ -889,7 +957,7 @@ def main():
         final_reason = None
         final_reason_source = "none"
 
-        if a_valid and b_valid and solomon:
+        if solomon:
             tie_payload = build_format_payload(
                 row,
                 model_a_sentiment=a_s,
@@ -899,7 +967,7 @@ def main():
             )
             t_prompt = tie_prompt.format_map(tie_payload)
 
-            t_s, t_c, t_reason, t_raw = call_and_parse_sentiment(
+            t_s, t_c, t_reason, t_raw, t_status = call_and_parse_sentiment(
                 tiebreaker_model,
                 t_prompt,
                 anthropic_client,
@@ -914,6 +982,12 @@ def main():
             df.at[idx, "tiebreaker_confidence"] = t_c
             df.at[idx, "tiebreaker_scum"] = t_sc
             df.at[idx, "tiebreaker_reason"] = t_reason
+            df.at[idx, "tiebreaker_status"] = t_status
+
+            if args.debug_tiebreaker:
+                print("\n--- TIEBREAKER RAW OUTPUT ---")
+                print(t_raw)
+                print("--- END TIEBREAKER RAW OUTPUT ---\n")
 
             if args.debug_save_raw:
                 df.at[idx, "tiebreaker_raw"] = t_raw
@@ -930,46 +1004,12 @@ def main():
                 final_sc = scum_score(final_s, final_c)
                 final_reason = f"A:{safe_text(a_reason)} | B:{safe_text(b_reason)}"
                 final_reason_source = "primary_avg_tiebreaker_failed"
-
-        elif a_valid and b_valid:
+        else:
             final_s = round((a_s + b_s) / 2, 4)
             final_c = round((a_c + b_c) / 2, 4)
             final_sc = scum_score(final_s, final_c)
             final_reason = f"A:{safe_text(a_reason)} | B:{safe_text(b_reason)}"
             final_reason_source = "primary_avg"
-
-        elif a_status == "abstention" or b_status == "abstention":
-            final_s = None
-            final_c = None
-            final_sc = None
-            final_reason = "Primary model abstention"
-            final_reason_source = "primary_abstention"
-
-            print(
-                f"[{idx + 1}/{len(df)}] {event_key} | {row['canonical_name']} | "
-                f"source={row['source_bucket']} | PRIMARY ABSTENTION | "
-                f"A_status={a_status} | B_status={b_status}"
-            )
-
-        elif a_status == "parse_failure" or b_status == "parse_failure":
-            final_s = None
-            final_c = None
-            final_sc = None
-            final_reason = "Primary scorer parse failure"
-            final_reason_source = "primary_parse_failure"
-
-            print(
-                f"[{idx + 1}/{len(df)}] {event_key} | {row['canonical_name']} | "
-                f"source={row['source_bucket']} | PRIMARY PARSE FAILURE | "
-                f"A_status={a_status} | B_status={b_status}"
-            )
-
-        else:
-            final_s = None
-            final_c = None
-            final_sc = None
-            final_reason = None
-            final_reason_source = "none"
 
         df.at[idx, "final_sentiment"] = final_s
         df.at[idx, "final_confidence"] = final_c
@@ -978,10 +1018,12 @@ def main():
         df.at[idx, "final_reason_source"] = final_reason_source
 
         print(
-            f"[{idx + 1}/{len(df)}] {event_key} | {row['canonical_name']} | source={row['source_bucket']} | "
+            f"[{idx + 1}/{len(df)}] "
+            f"{event_key} | {row['canonical_name']} | source={row['source_bucket']} | "
             f"A={a_sc} | B={b_sc} | solomon={solomon} | final={final_sc} | "
             f"final_source={final_reason_source} | "
-            f"A_reason={short_reason(a_reason)} | B_reason={short_reason(b_reason)}"
+            f"A_reason={short_reason(a_reason)} | "
+            f"B_reason={short_reason(b_reason)}"
         )
 
         rows_since_save += 1
@@ -997,22 +1039,25 @@ def main():
     print("\nFinal reason sources:")
     print(df["final_reason_source"].value_counts(dropna=False))
 
-    print("\nPrefilter decisions:")
-    print(df["prefilter_decision"].value_counts(dropna=False))
+    if "prefilter_decision" in df.columns:
+        print("\nPrefilter decisions:")
+        print(df["prefilter_decision"].value_counts(dropna=False))
 
-    rescue_counts = pd.Series(df["title_inheritance_rescue"]).astype("boolean").fillna(False).value_counts(dropna=False)
-    print("\nTitle inheritance rescues:")
-    print(rescue_counts)
+    if "title_inheritance_rescue" in df.columns:
+        print("\nTitle inheritance rescues:")
+        rescue_series = df["title_inheritance_rescue"]
+        rescue_series = rescue_series.astype("boolean")
+        print(rescue_series.value_counts(dropna=False))
 
     print("\nPrimary validity:")
-    print("A valid:", int((df["primary_a_status"] == "valid").sum()))
-    print("B valid:", int((df["primary_b_status"] == "valid").sum()))
+    print("A valid:", int(pd.Series(df["primary_a_status"]).isin(["valid", "neutralized_abstention"]).sum()))
+    print("B valid:", int(pd.Series(df["primary_b_status"]).isin(["valid", "neutralized_abstention"]).sum()))
 
     print("\nPrimary statuses:")
     print("A:")
-    print(df["primary_a_status"].value_counts(dropna=False))
+    print(pd.Series(df["primary_a_status"]).value_counts(dropna=False))
     print("\nB:")
-    print(df["primary_b_status"].value_counts(dropna=False))
+    print(pd.Series(df["primary_b_status"]).value_counts(dropna=False))
 
 
 if __name__ == "__main__":
