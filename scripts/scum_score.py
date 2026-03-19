@@ -99,6 +99,12 @@ def should_rescue_by_thread_title(row: pd.Series) -> bool:
     return text_contains_firm_name(row.get("thread_title"), row.get("canonical_name"))
 
 
+def build_row_key(df: pd.DataFrame) -> pd.Series:
+    event_ids = df["event_id"].fillna("").astype(str)
+    firm_names = df["canonical_name"].fillna("").astype(str)
+    return event_ids + "||" + firm_names
+
+
 class SafeDict(dict):
     def __missing__(self, key):
         return "{" + key + "}"
@@ -125,6 +131,7 @@ def parse_args():
 
     parser.add_argument("--event-file", type=str, default=None)
     parser.add_argument("--thread-file", type=str, default=None)
+    parser.add_argument("--resume-from", type=str, default=None)
 
     parser.add_argument("--show-latest-files", action="store_true")
     parser.add_argument("--debug-primary-a", action="store_true")
@@ -168,11 +175,24 @@ def autosave_df(df: pd.DataFrame, outdir: str, prefix: str = "scored_events") ->
     return outfile
 
 
+def save_df_clean(df: pd.DataFrame, outdir: str, prefix: str = "scored_events") -> Path:
+    return autosave_df(df.drop(columns=["_row_key"], errors="ignore"), outdir, prefix=prefix)
+
+
 def print_latest_files(paths: Dict[str, str]) -> None:
     latest_event = latest_parquet(paths["event_firm_dir"], prefix="event_firm_pairs")
     latest_thread = latest_parquet(paths["thread_firm_dir"], prefix="thread_firm_pairs")
     print("Latest thread file:", latest_thread.name)
     print("Latest event file :", latest_event.name)
+
+
+def load_resume_file(resume_path: Optional[str]) -> Optional[pd.DataFrame]:
+    if not resume_path:
+        return None
+    p = Path(resume_path)
+    if not p.exists():
+        raise FileNotFoundError(f"Resume file not found: {p}")
+    return pd.read_parquet(p).copy()
 
 
 # ==========================================================
@@ -735,6 +755,34 @@ def main():
     df = prepare_scoring_df(event_df, thread_df)
     df = apply_filters(df, args).reset_index(drop=True)
 
+    resume_df = load_resume_file(args.resume_from)
+    if resume_df is not None:
+        if "event_id" not in resume_df.columns or "canonical_name" not in resume_df.columns:
+            raise ValueError("Resume file must contain event_id and canonical_name columns")
+
+        resume_df = resume_df.copy()
+        resume_df["_row_key"] = build_row_key(resume_df)
+        resume_df = resume_df.drop_duplicates(subset=["_row_key"], keep="last").copy()
+
+        df["_row_key"] = build_row_key(df)
+        completed_keys = set(resume_df["_row_key"].tolist())
+        pending_mask = ~df["_row_key"].isin(completed_keys)
+
+        already_done = int((~pending_mask).sum())
+        pending_df = df[pending_mask].copy().reset_index(drop=True)
+
+        print(f"Resume file: {args.resume_from}")
+        print(f"Already scored rows found: {already_done}")
+        print(f"Rows remaining to score: {len(pending_df)}")
+
+        if len(pending_df) == 0:
+            print("Nothing left to score.")
+            return
+
+        df = pending_df
+    else:
+        df["_row_key"] = build_row_key(df)
+
     print("Using input files:")
     print("EVENT :", event_file)
     print("THREAD:", thread_file)
@@ -783,7 +831,7 @@ def main():
 
                 rows_since_save += 1
                 if rows_since_save >= autosave_every:
-                    outfile = autosave_df(df, paths["scored_events_dir"])
+                    outfile = save_df_clean(df, paths["scored_events_dir"])
                     print(f"AUTOSAVED: {outfile}")
                     rows_since_save = 0
                 continue
@@ -838,7 +886,7 @@ def main():
 
                     rows_since_save += 1
                     if rows_since_save >= autosave_every:
-                        outfile = autosave_df(df, paths["scored_events_dir"])
+                        outfile = save_df_clean(df, paths["scored_events_dir"])
                         print(f"AUTOSAVED: {outfile}")
                         rows_since_save = 0
                     continue
@@ -933,7 +981,7 @@ def main():
 
             rows_since_save += 1
             if rows_since_save >= autosave_every:
-                outfile = autosave_df(df, paths["scored_events_dir"])
+                outfile = save_df_clean(df, paths["scored_events_dir"])
                 print(f"AUTOSAVED: {outfile}")
                 rows_since_save = 0
             continue
@@ -1018,11 +1066,11 @@ def main():
 
         rows_since_save += 1
         if rows_since_save >= autosave_every:
-            outfile = autosave_df(df, paths["scored_events_dir"])
+            outfile = save_df_clean(df, paths["scored_events_dir"])
             print(f"AUTOSAVED: {outfile}")
             rows_since_save = 0
 
-    outfile = autosave_df(df, paths["scored_events_dir"])
+    outfile = save_df_clean(df, paths["scored_events_dir"])
 
     print("\nSaved:", outfile)
     print("\nFinal scored rows:", int(df["final_scum"].notna().sum()))
