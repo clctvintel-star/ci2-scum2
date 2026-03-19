@@ -5,7 +5,7 @@ import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple, List
+from typing import Any, Dict, Optional, Tuple
 
 import pandas as pd
 from anthropic import Anthropic
@@ -26,7 +26,6 @@ COMPLETED_REASON_SOURCES = {
     "primary_failure",
     "primary_avg_tiebreaker_failed",
 }
-
 
 STATEFUL_COLUMNS = [
     "title_inheritance_rescue",
@@ -583,8 +582,8 @@ def call_and_parse_sentiment(
             effective_prompt = (
                 prompt
                 + "\n\nIMPORTANT: Return one complete valid JSON object only with keys "
-                  '"sentiment", "confidence", and "explanation". '
-                  "No markdown. No extra text."
+                + '"sentiment", "confidence", and "explanation". '
+                + "No markdown. No extra text."
             )
 
         raw = call_model(
@@ -626,9 +625,9 @@ def call_and_parse_relevance(
             effective_prompt = (
                 prompt
                 + "\n\nIMPORTANT: Return only either:\n"
-                  "Decision: KEEP|DROP|UNCERTAIN\n"
-                  "Confidence: 0.0-1.0\n"
-                  "Reason: ...\n"
+                + "Decision: KEEP|DROP|UNCERTAIN\n"
+                + "Confidence: 0.0-1.0\n"
+                + "Reason: ...\n"
             )
 
         raw = call_model(
@@ -726,8 +725,8 @@ def apply_filters(df: pd.DataFrame, args) -> pd.DataFrame:
     if args.sample_per_firm is not None:
         out = (
             out.groupby("canonical_name", group_keys=False)
-               .apply(lambda x: x.sample(n=min(len(x), args.sample_per_firm), random_state=42))
-               .reset_index(drop=True)
+            .apply(lambda x: x.sample(n=min(len(x), args.sample_per_firm), random_state=42))
+            .reset_index(drop=True)
         )
 
     if args.limit is not None:
@@ -742,7 +741,10 @@ def overlay_resume_state(df: pd.DataFrame, resume_df: pd.DataFrame) -> pd.DataFr
     resume_df = resume_df.drop_duplicates(subset=["_row_key"], keep="last").copy()
 
     completed_mask = is_completed_df(resume_df)
-    resume_done = resume_df.loc[completed_mask, ["_row_key"] + [c for c in STATEFUL_COLUMNS if c in resume_df.columns]].copy()
+    resume_done = resume_df.loc[
+        completed_mask,
+        ["_row_key"] + [c for c in STATEFUL_COLUMNS if c in resume_df.columns],
+    ].copy()
 
     if resume_done.empty:
         return df
@@ -874,4 +876,282 @@ def main():
             pre_decision, pre_conf, pre_reason, pre_source = heuristic_prefilter(row)
 
             if pre_decision == "DROP":
-                df.at[idx, "prefilter
+                df.at[idx, "prefilter_decision"] = pre_decision
+                df.at[idx, "prefilter_confidence"] = pre_conf
+                df.at[idx, "prefilter_reason"] = pre_reason
+                df.at[idx, "prefilter_source"] = pre_source
+                df.at[idx, "final_reason"] = pre_reason
+                df.at[idx, "final_reason_source"] = "prefilter_drop"
+
+                print(
+                    f"[{counter}/{total_pending}] {event_key} | {row['canonical_name']} | "
+                    f"source={row['source_bucket']} | PREFILTER_DROP | "
+                    f"reason={short_reason(pre_reason)}"
+                )
+
+                rows_since_save += 1
+                if rows_since_save >= autosave_every:
+                    outfile = save_df_clean(df, paths["scored_events_dir"], prefix="scored_events")
+                    print(f"AUTOSAVED: {outfile}")
+                    rows_since_save = 0
+                continue
+
+        if relevance_prompt and not args.disable_llm_prefilter:
+            relevance_text = relevance_prompt.format_map(payload)
+            r_decision, r_conf, r_reason, r_raw = call_and_parse_relevance(
+                relevance_model,
+                relevance_text,
+                anthropic_client,
+                openai_client,
+                gemini_client,
+                retry_limit=retry_limit,
+            )
+
+            if r_decision == "DROP" and title_rescue:
+                df.at[idx, "prefilter_decision"] = "KEEP"
+                df.at[idx, "prefilter_confidence"] = r_conf
+                df.at[idx, "prefilter_reason"] = (
+                    "Rescued from DROP because canonical_name appears in thread_title. "
+                    f"Original prefilter reason: {safe_text(r_reason)}"
+                )
+                df.at[idx, "prefilter_source"] = "llm_relevance_title_rescue"
+
+                if args.debug_save_raw:
+                    df.at[idx, "prefilter_raw"] = r_raw
+
+                print(
+                    f"[{counter}/{total_pending}] {event_key} | {row['canonical_name']} | "
+                    f"source={row['source_bucket']} | PREFILTER_RESCUE_TITLE | "
+                    f"reason={short_reason(r_reason)}"
+                )
+
+            else:
+                df.at[idx, "prefilter_decision"] = r_decision
+                df.at[idx, "prefilter_confidence"] = r_conf
+                df.at[idx, "prefilter_reason"] = r_reason
+                df.at[idx, "prefilter_source"] = "llm_relevance"
+
+                if args.debug_save_raw:
+                    df.at[idx, "prefilter_raw"] = r_raw
+
+                if r_decision == "DROP":
+                    df.at[idx, "final_reason"] = r_reason
+                    df.at[idx, "final_reason_source"] = "prefilter_drop"
+
+                    print(
+                        f"[{counter}/{total_pending}] {event_key} | {row['canonical_name']} | "
+                        f"source={row['source_bucket']} | PREFILTER_DROP | "
+                        f"reason={short_reason(r_reason)}"
+                    )
+
+                    rows_since_save += 1
+                    if rows_since_save >= autosave_every:
+                        outfile = save_df_clean(df, paths["scored_events_dir"], prefix="scored_events")
+                        print(f"AUTOSAVED: {outfile}")
+                        rows_since_save = 0
+                    continue
+
+        prompt = primary_prompt.format_map(payload)
+
+        a_s, a_c, a_reason, a_raw, a_status = call_and_parse_sentiment(
+            primary_a_model,
+            prompt,
+            anthropic_client,
+            openai_client,
+            gemini_client,
+            retry_limit=retry_limit,
+        )
+
+        b_s, b_c, b_reason, b_raw, b_status = call_and_parse_sentiment(
+            primary_b_model,
+            prompt,
+            anthropic_client,
+            openai_client,
+            gemini_client,
+            retry_limit=retry_limit,
+        )
+
+        if args.debug_primary_a:
+            print("\n--- PRIMARY_A RAW OUTPUT ---")
+            print(a_raw)
+            print("--- END PRIMARY_A RAW OUTPUT ---\n")
+
+        if args.debug_primary_b:
+            print("\n--- PRIMARY_B RAW OUTPUT ---")
+            print(b_raw)
+            print("--- END PRIMARY_B RAW OUTPUT ---\n")
+
+        if a_status == "neutralized_abstention":
+            print("\n--- PRIMARY_A ABSTENTION NORMALIZED TO NEUTRAL ---")
+            print(a_raw)
+            print("--- END PRIMARY_A ---\n")
+
+        if b_status == "neutralized_abstention":
+            print("\n--- PRIMARY_B ABSTENTION NORMALIZED TO NEUTRAL ---")
+            print(b_raw)
+            print("--- END PRIMARY_B ---\n")
+
+        a_sc = scum_score(a_s, a_c)
+        b_sc = scum_score(b_s, b_c)
+
+        df.at[idx, "primary_a_sentiment"] = a_s
+        df.at[idx, "primary_a_confidence"] = a_c
+        df.at[idx, "primary_a_scum"] = a_sc
+        df.at[idx, "primary_a_reason"] = a_reason
+        df.at[idx, "primary_a_status"] = a_status
+
+        df.at[idx, "primary_b_sentiment"] = b_s
+        df.at[idx, "primary_b_confidence"] = b_c
+        df.at[idx, "primary_b_scum"] = b_sc
+        df.at[idx, "primary_b_reason"] = b_reason
+        df.at[idx, "primary_b_status"] = b_status
+
+        if args.debug_save_raw:
+            df.at[idx, "primary_a_raw"] = a_raw
+            df.at[idx, "primary_b_raw"] = b_raw
+
+        a_valid = is_valid_score(a_s, a_c)
+        b_valid = is_valid_score(b_s, b_c)
+
+        if not (a_valid and b_valid):
+            df.at[idx, "solomon_triggered"] = False
+            df.at[idx, "final_sentiment"] = None
+            df.at[idx, "final_confidence"] = None
+            df.at[idx, "final_scum"] = None
+            df.at[idx, "final_reason"] = (
+                f"Primary failure. A_status={a_status}, B_status={b_status}. "
+                f"A_reason={safe_text(a_reason)} | B_reason={safe_text(b_reason)}"
+            )
+            df.at[idx, "final_reason_source"] = "primary_failure"
+
+            print(
+                f"[{counter}/{total_pending}] {event_key} | {row['canonical_name']} | "
+                f"source={row['source_bucket']} | PRIMARY FAILURE | "
+                f"A_status={a_status} | B_status={b_status}"
+            )
+
+            print(
+                f"[{counter}/{total_pending}] "
+                f"{event_key} | {row['canonical_name']} | source={row['source_bucket']} | "
+                f"A={a_sc} | B={b_sc} | solomon=False | final=None | "
+                f"final_source=primary_failure | "
+                f"A_reason={short_reason(a_reason)} | "
+                f"B_reason={short_reason(b_reason)}"
+            )
+
+            rows_since_save += 1
+            if rows_since_save >= autosave_every:
+                outfile = save_df_clean(df, paths["scored_events_dir"], prefix="scored_events")
+                print(f"AUTOSAVED: {outfile}")
+                rows_since_save = 0
+            continue
+
+        solomon = should_trigger_solomon(a_s, a_c, a_sc, b_s, b_c, b_sc, disagree_threshold)
+        df.at[idx, "solomon_triggered"] = solomon
+
+        if solomon:
+            tie_payload = build_format_payload(
+                row,
+                model_a_sentiment=a_s,
+                model_a_confidence=a_c,
+                model_b_sentiment=b_s,
+                model_b_confidence=b_c,
+            )
+            t_prompt = tie_prompt.format_map(tie_payload)
+
+            t_s, t_c, t_reason, t_raw, t_status = call_and_parse_sentiment(
+                tiebreaker_model,
+                t_prompt,
+                anthropic_client,
+                openai_client,
+                gemini_client,
+                retry_limit=retry_limit,
+            )
+
+            t_sc = scum_score(t_s, t_c)
+
+            df.at[idx, "tiebreaker_sentiment"] = t_s
+            df.at[idx, "tiebreaker_confidence"] = t_c
+            df.at[idx, "tiebreaker_scum"] = t_sc
+            df.at[idx, "tiebreaker_reason"] = t_reason
+            df.at[idx, "tiebreaker_status"] = t_status
+
+            if args.debug_tiebreaker:
+                print("\n--- TIEBREAKER RAW OUTPUT ---")
+                print(t_raw)
+                print("--- END TIEBREAKER RAW OUTPUT ---\n")
+
+            if args.debug_save_raw:
+                df.at[idx, "tiebreaker_raw"] = t_raw
+
+            if is_valid_score(t_s, t_c):
+                final_s = t_s
+                final_c = t_c
+                final_sc = t_sc
+                final_reason = t_reason
+                final_reason_source = "tiebreaker"
+            else:
+                final_s = round((a_s + b_s) / 2, 4)
+                final_c = round((a_c + b_c) / 2, 4)
+                final_sc = scum_score(final_s, final_c)
+                final_reason = f"A:{safe_text(a_reason)} | B:{safe_text(b_reason)}"
+                final_reason_source = "primary_avg_tiebreaker_failed"
+        else:
+            final_s = round((a_s + b_s) / 2, 4)
+            final_c = round((a_c + b_c) / 2, 4)
+            final_sc = scum_score(final_s, final_c)
+            final_reason = f"A:{safe_text(a_reason)} | B:{safe_text(b_reason)}"
+            final_reason_source = "primary_avg"
+
+        df.at[idx, "final_sentiment"] = final_s
+        df.at[idx, "final_confidence"] = final_c
+        df.at[idx, "final_scum"] = final_sc
+        df.at[idx, "final_reason"] = final_reason
+        df.at[idx, "final_reason_source"] = final_reason_source
+
+        print(
+            f"[{counter}/{total_pending}] "
+            f"{event_key} | {row['canonical_name']} | source={row['source_bucket']} | "
+            f"A={a_sc} | B={b_sc} | solomon={solomon} | final={final_sc} | "
+            f"final_source={final_reason_source} | "
+            f"A_reason={short_reason(a_reason)} | "
+            f"B_reason={short_reason(b_reason)}"
+        )
+
+        rows_since_save += 1
+        if rows_since_save >= autosave_every:
+            outfile = save_df_clean(df, paths["scored_events_dir"], prefix="scored_events")
+            print(f"AUTOSAVED: {outfile}")
+            rows_since_save = 0
+
+    latest_outfile = save_df_clean(df, paths["scored_events_dir"], prefix="scored_events")
+    final_outfile = save_final_df(df, paths["scored_events_dir"], prefix="scored_events")
+
+    print("\nLatest rolling save:", latest_outfile)
+    print("Saved final:", final_outfile)
+    print("\nFinal scored rows:", int(df["final_scum"].notna().sum()))
+    print("\nFinal reason sources:")
+    print(df["final_reason_source"].value_counts(dropna=False))
+
+    if "prefilter_decision" in df.columns:
+        print("\nPrefilter decisions:")
+        print(df["prefilter_decision"].value_counts(dropna=False))
+
+    if "title_inheritance_rescue" in df.columns:
+        print("\nTitle inheritance rescues:")
+        rescue_series = df["title_inheritance_rescue"].astype("boolean")
+        print(rescue_series.value_counts(dropna=False))
+
+    print("\nPrimary validity:")
+    print("A valid:", int(pd.Series(df["primary_a_status"]).isin(["valid", "neutralized_abstention"]).sum()))
+    print("B valid:", int(pd.Series(df["primary_b_status"]).isin(["valid", "neutralized_abstention"]).sum()))
+
+    print("\nPrimary statuses:")
+    print("A:")
+    print(pd.Series(df["primary_a_status"]).value_counts(dropna=False))
+    print("\nB:")
+    print(pd.Series(df["primary_b_status"]).value_counts(dropna=False))
+
+
+if __name__ == "__main__":
+    main()
