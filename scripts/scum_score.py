@@ -170,13 +170,23 @@ def read_text(path: Path) -> str:
 
 
 def autosave_df(df: pd.DataFrame, outdir: str, prefix: str = "scored_events") -> Path:
-    outfile = Path(outdir) / f"{prefix}_{current_utc_stamp()}.parquet"
+    ensure_dir(outdir)
+    outfile = Path(outdir) / f"{prefix}_latest.parquet"
     df.to_parquet(outfile, index=False)
     return outfile
 
 
 def save_df_clean(df: pd.DataFrame, outdir: str, prefix: str = "scored_events") -> Path:
-    return autosave_df(df.drop(columns=["_row_key"], errors="ignore"), outdir, prefix=prefix)
+    clean_df = df.drop(columns=["_row_key"], errors="ignore")
+    return autosave_df(clean_df, outdir, prefix=prefix)
+
+
+def save_final_df(df: pd.DataFrame, outdir: str, prefix: str = "scored_events") -> Path:
+    ensure_dir(outdir)
+    outfile = Path(outdir) / f"{prefix}_{current_utc_stamp()}.parquet"
+    clean_df = df.drop(columns=["_row_key"], errors="ignore")
+    clean_df.to_parquet(outfile, index=False)
+    return outfile
 
 
 def print_latest_files(paths: Dict[str, str]) -> None:
@@ -831,7 +841,7 @@ def main():
 
                 rows_since_save += 1
                 if rows_since_save >= autosave_every:
-                    outfile = save_df_clean(df, paths["scored_events_dir"])
+                    outfile = save_df_clean(df, paths["scored_events_dir"], prefix="scored_events")
                     print(f"AUTOSAVED: {outfile}")
                     rows_since_save = 0
                 continue
@@ -886,7 +896,7 @@ def main():
 
                     rows_since_save += 1
                     if rows_since_save >= autosave_every:
-                        outfile = save_df_clean(df, paths["scored_events_dir"])
+                        outfile = save_df_clean(df, paths["scored_events_dir"], prefix="scored_events")
                         print(f"AUTOSAVED: {outfile}")
                         rows_since_save = 0
                     continue
@@ -981,7 +991,7 @@ def main():
 
             rows_since_save += 1
             if rows_since_save >= autosave_every:
-                outfile = save_df_clean(df, paths["scored_events_dir"])
+                outfile = save_df_clean(df, paths["scored_events_dir"], prefix="scored_events")
                 print(f"AUTOSAVED: {outfile}")
                 rows_since_save = 0
             continue
@@ -1066,13 +1076,17 @@ def main():
 
         rows_since_save += 1
         if rows_since_save >= autosave_every:
-            outfile = save_df_clean(df, paths["scored_events_dir"])
+            outfile = save_df_clean(df, paths["scored_events_dir"], prefix="scored_events")
             print(f"AUTOSAVED: {outfile}")
             rows_since_save = 0
 
-    outfile = save_df_clean(df, paths["scored_events_dir"])
+    latest_outfile = save_df_clean(df, paths["scored_events_dir"], prefix="scored_events")
+    final_outfile = save_final_df(df, paths["scored_events_dir"], prefix="scored_events")
 
-    print("\nSaved:", outfile)
+    outfile = final_outfile
+
+    print("\nLatest rolling save:", latest_outfile)
+    print("Saved final:", outfile)
     print("\nFinal scored rows:", int(df["final_scum"].notna().sum()))
     print("\nFinal reason sources:")
     print(df["final_reason_source"].value_counts(dropna=False))
