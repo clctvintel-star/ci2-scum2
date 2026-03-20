@@ -16,7 +16,7 @@ from utils import load_configs, load_env, ensure_dir, load_prompt
 # =========================================================
 # "full" = rebuild thread_firm_pairs with LLM + rebuild event_firm_pairs
 # "rebuild_events_from_existing_threads" = skip LLM, load existing thread_firm_pairs, rebuild only event_firm_pairs
-RUN_MODE = "full"
+RUN_MODE = "rebuild_events_from_existing_threads"
 
 # If RUN_MODE == "rebuild_events_from_existing_threads":
 # - if this is None, the script will auto-pick the latest thread_firm_pairs_*.parquet
