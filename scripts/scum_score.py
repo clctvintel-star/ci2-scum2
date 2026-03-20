@@ -60,6 +60,12 @@ STATEFUL_COLUMNS = [
     "tiebreaker_raw",
 ]
 
+CHECKPOINT_COLUMNS = [
+    "event_id",
+    "canonical_name",
+    "_row_key",
+] + STATEFUL_COLUMNS
+
 
 # ==========================================================
 # helper utils
@@ -237,18 +243,25 @@ def atomic_write_parquet(df: pd.DataFrame, outfile: Path) -> Path:
 
 def autosave_df(df: pd.DataFrame, outdir: str, prefix: str = "scored_events") -> Path:
     outfile = Path(outdir) / f"{prefix}_latest.parquet"
-    return atomic_write_parquet(df, outfile)
+    clean_df = df.drop(columns=["_row_key"], errors="ignore")
+    return atomic_write_parquet(clean_df, outfile)
 
 
 def save_df_clean(df: pd.DataFrame, outdir: str, prefix: str = "scored_events") -> Path:
-    clean_df = df.drop(columns=["_row_key"], errors="ignore")
-    return autosave_df(clean_df, outdir, prefix=prefix)
+    return autosave_df(df, outdir, prefix=prefix)
 
 
 def save_final_df(df: pd.DataFrame, outdir: str, prefix: str = "scored_events") -> Path:
     outfile = Path(outdir) / f"{prefix}_{current_utc_stamp()}.parquet"
     clean_df = df.drop(columns=["_row_key"], errors="ignore")
     return atomic_write_parquet(clean_df, outfile)
+
+
+def save_checkpoint_df(df: pd.DataFrame, outdir: str, prefix: str = "scored_events") -> Path:
+    outfile = Path(outdir) / f"{prefix}_checkpoint_latest.parquet"
+    cols_present = [c for c in CHECKPOINT_COLUMNS if c in df.columns]
+    slim_df = df[cols_present].copy()
+    return atomic_write_parquet(slim_df, outfile)
 
 
 def print_latest_files(paths: Dict[str, str]) -> None:
@@ -776,6 +789,9 @@ def heuristic_prefilter(row: pd.Series) -> Tuple[Optional[str], Optional[float],
     if text in {"[deleted]", "[removed]", "deleted", "removed"}:
         return "DROP", 1.0, f"Event text is {text}.", "heuristic"
 
+    if text in {"ok", "yes", "no", "thanks", "same", "bump"}:
+        return "DROP", 0.99, "Low-information acknowledgment.", "heuristic"
+
     if len(text) < 12 or tok_n <= 2:
         return "DROP", 0.98, f"Event text too short for reputational scoring (len={len(text)}, tokens={tok_n}).", "heuristic"
 
@@ -820,12 +836,14 @@ def main():
         if "event_id" not in resume_df.columns or "canonical_name" not in resume_df.columns:
             raise ValueError("Resume file must contain event_id and canonical_name columns")
 
+        print(f"Resume file: {args.resume_from}")
+        print(f"Resume rows loaded: {len(resume_df)}")
+
         df = overlay_resume_state(df, resume_df)
         completed_mask = is_completed_df(df)
         already_done = int(completed_mask.sum())
         pending_indices = df.index[~completed_mask].tolist()
 
-        print(f"Resume file: {args.resume_from}")
         print(f"Already completed rows found: {already_done}")
         print(f"Rows remaining to score before limit: {len(pending_indices)}")
     else:
@@ -850,20 +868,25 @@ def main():
 
     if len(pending_indices) == 0:
         print("Nothing left to score.")
+        checkpoint_outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix="scored_events")
         latest_outfile = save_df_clean(df, paths["scored_events_dir"], prefix="scored_events")
+        print("Latest checkpoint save:", checkpoint_outfile)
         print("Latest rolling save:", latest_outfile)
         return
 
     retry_limit = settings.get("scoring", {}).get("retry_limit", 3)
     disagree_threshold = settings.get("scoring", {}).get("disagree_threshold", 0.2)
-    autosave_every = settings.get("scoring", {}).get("autosave_every_n_rows", 50)
+
+    checkpoint_every = 10
+    full_autosave_every = 200
 
     primary_a_model = settings["models"]["score"]["primary_a"]
     primary_b_model = settings["models"]["score"]["primary_b"]
     tiebreaker_model = settings["models"]["score"]["tiebreaker"]
     relevance_model = settings["models"]["score"].get("relevance_filter", primary_b_model)
 
-    rows_since_save = 0
+    rows_since_checkpoint = 0
+    rows_since_full_autosave = 0
     total_pending = len(pending_indices)
 
     for counter, idx in enumerate(pending_indices, start=1):
@@ -891,11 +914,19 @@ def main():
                     f"reason={short_reason(pre_reason)}"
                 )
 
-                rows_since_save += 1
-                if rows_since_save >= autosave_every:
+                rows_since_checkpoint += 1
+                rows_since_full_autosave += 1
+
+                if rows_since_checkpoint >= checkpoint_every:
+                    outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix="scored_events")
+                    print(f"CHECKPOINT SAVED: {outfile}")
+                    rows_since_checkpoint = 0
+
+                if rows_since_full_autosave >= full_autosave_every:
                     outfile = save_df_clean(df, paths["scored_events_dir"], prefix="scored_events")
-                    print(f"AUTOSAVED: {outfile}")
-                    rows_since_save = 0
+                    print(f"FULL AUTOSAVED: {outfile}")
+                    rows_since_full_autosave = 0
+
                 continue
 
         if relevance_prompt and not args.disable_llm_prefilter:
@@ -946,11 +977,19 @@ def main():
                         f"reason={short_reason(r_reason)}"
                     )
 
-                    rows_since_save += 1
-                    if rows_since_save >= autosave_every:
+                    rows_since_checkpoint += 1
+                    rows_since_full_autosave += 1
+
+                    if rows_since_checkpoint >= checkpoint_every:
+                        outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix="scored_events")
+                        print(f"CHECKPOINT SAVED: {outfile}")
+                        rows_since_checkpoint = 0
+
+                    if rows_since_full_autosave >= full_autosave_every:
                         outfile = save_df_clean(df, paths["scored_events_dir"], prefix="scored_events")
-                        print(f"AUTOSAVED: {outfile}")
-                        rows_since_save = 0
+                        print(f"FULL AUTOSAVED: {outfile}")
+                        rows_since_full_autosave = 0
+
                     continue
 
         prompt = primary_prompt.format_map(payload)
@@ -1041,11 +1080,19 @@ def main():
                 f"B_reason={short_reason(b_reason)}"
             )
 
-            rows_since_save += 1
-            if rows_since_save >= autosave_every:
+            rows_since_checkpoint += 1
+            rows_since_full_autosave += 1
+
+            if rows_since_checkpoint >= checkpoint_every:
+                outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix="scored_events")
+                print(f"CHECKPOINT SAVED: {outfile}")
+                rows_since_checkpoint = 0
+
+            if rows_since_full_autosave >= full_autosave_every:
                 outfile = save_df_clean(df, paths["scored_events_dir"], prefix="scored_events")
-                print(f"AUTOSAVED: {outfile}")
-                rows_since_save = 0
+                print(f"FULL AUTOSAVED: {outfile}")
+                rows_since_full_autosave = 0
+
             continue
 
         solomon = should_trigger_solomon(a_s, a_c, a_sc, b_s, b_c, b_sc, disagree_threshold)
@@ -1120,16 +1167,25 @@ def main():
             f"B_reason={short_reason(b_reason)}"
         )
 
-        rows_since_save += 1
-        if rows_since_save >= autosave_every:
-            outfile = save_df_clean(df, paths["scored_events_dir"], prefix="scored_events")
-            print(f"AUTOSAVED: {outfile}")
-            rows_since_save = 0
+        rows_since_checkpoint += 1
+        rows_since_full_autosave += 1
 
+        if rows_since_checkpoint >= checkpoint_every:
+            outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix="scored_events")
+            print(f"CHECKPOINT SAVED: {outfile}")
+            rows_since_checkpoint = 0
+
+        if rows_since_full_autosave >= full_autosave_every:
+            outfile = save_df_clean(df, paths["scored_events_dir"], prefix="scored_events")
+            print(f"FULL AUTOSAVED: {outfile}")
+            rows_since_full_autosave = 0
+
+    checkpoint_outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix="scored_events")
     latest_outfile = save_df_clean(df, paths["scored_events_dir"], prefix="scored_events")
     final_outfile = save_final_df(df, paths["scored_events_dir"], prefix="scored_events")
 
-    print("\nLatest rolling save:", latest_outfile)
+    print("\nLatest checkpoint save:", checkpoint_outfile)
+    print("Latest rolling save:", latest_outfile)
     print("Saved final:", final_outfile)
     print("\nFinal scored rows:", int(df["final_scum"].notna().sum()))
     print("\nFinal reason sources:")
