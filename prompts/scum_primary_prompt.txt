@@ -16,6 +16,20 @@ Use THREAD TITLE, THREAD TEXT, and PARENT TEXT only to resolve:
 
 Do NOT score the whole thread.
 
+CONTEXT-DEPENDENT RESPONSE RULE
+
+If the EVENT TEXT is brief, vague, or does not contain a clear standalone opinion (e.g., short replies, acknowledgments, reactions, or statements that rely on prior context):
+
+- Do NOT evaluate it independently
+- Use PARENT TEXT as the primary source of meaning and derive sentiment from it
+- Treat the EVENT TEXT as modifying, reinforcing, or reacting to the PARENT TEXT
+- If the PARENT TEXT provides clear directional sentiment about "{FUND_NAME}", inherit that direction (adjust magnitude and confidence as appropriate)
+- If the PARENT TEXT is missing, unclear, or not about "{FUND_NAME}", return:
+  sentiment = 0.0
+  confidence = 0.1–0.2
+
+This ensures dependent responses are scored based on their actual referent rather than treated as standalone signals.
+
 Scope rules:
 - Score sentiment ABOUT "{FUND_NAME}" only.
 - Do NOT score other firms unless comparison clearly changes perception of "{FUND_NAME}".
@@ -53,7 +67,7 @@ If the event is relevant to "{FUND_NAME}", you MUST return a numeric sentiment s
 
 Relevant but nondiagnostic events should usually be scored:
 
-sentiment = 0.0  
+sentiment = 0.0
 confidence = low but greater than 0.0
 
 Return null ONLY if the event is genuinely unrelated to "{FUND_NAME}" even after using thread and parent context.
@@ -78,17 +92,21 @@ Low confidence
 
 Confidence must be 0 only if the event is unrelated to the firm.
 
+IMPORTANT:
+EVENT TEXT may depend on PARENT TEXT for meaning.
+Always resolve context using PARENT TEXT before assigning sentiment, especially for short or ambiguous responses.
+
 Return valid JSON only.
 No markdown fences.
 No extra text.
 
 Return exactly this object shape:
 
-{{
+{
   "sentiment": <number from -1.0 to 1.0 or null>,
   "confidence": <number from 0.0 to 1.0>,
   "explanation": "<brief explanation>"
-}}
+}
 
 Firm: {FUND_NAME}
 Matched aliases: {MATCHED_ALIASES}
