@@ -25,6 +25,7 @@ Important distinction:
 - A KEEP row may still receive a final sentiment of 0.0.
 - Do NOT DROP a row merely because it is weak, procedural, mixed, or neutral.
 - DROP only when the event genuinely provides no usable information about "{FUND_NAME}".
+- A row should be KEPT if it is about "{FUND_NAME}" closely enough that a reasonable job applicant could extract some interpretable employer-related signal from it, even if the signal is weak, indirect, mixed, or ultimately neutral.
 
 Job-seeker framing:
 A row is worth KEEPING if a reasonable job applicant could treat it as information about:
