@@ -729,9 +729,6 @@ def apply_filters(df: pd.DataFrame, args) -> pd.DataFrame:
             .reset_index(drop=True)
         )
 
-    if args.limit is not None:
-        out = out.head(args.limit).copy()
-
     return out
 
 
@@ -830,16 +827,21 @@ def main():
 
         print(f"Resume file: {args.resume_from}")
         print(f"Already completed rows found: {already_done}")
-        print(f"Rows remaining to score: {len(pending_indices)}")
+        print(f"Rows remaining to score before limit: {len(pending_indices)}")
     else:
         pending_indices = df.index.tolist()
+        already_done = 0
+
+    if args.limit is not None:
+        pending_indices = pending_indices[:args.limit]
 
     print("Using input files:")
     print("EVENT :", event_file)
     print("THREAD:", thread_file)
     print()
     print("Rows queued:", len(df))
-    print("Rows pending:", len(pending_indices))
+    print("Already done:", already_done)
+    print("Rows pending this run:", len(pending_indices))
 
     if "source_bucket" in df.columns:
         print("Source bucket counts:")
