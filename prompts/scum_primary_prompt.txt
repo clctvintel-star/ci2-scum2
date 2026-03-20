@@ -28,6 +28,11 @@ If the EVENT TEXT is brief, vague, or does not contain a clear standalone opinio
   sentiment = 0.0
   confidence = 0.1–0.2
 
+Important:
+Do NOT amplify weak or incidental mentions from PARENT TEXT into meaningful sentiment.
+
+If the EVENT TEXT does not actively engage with or modify the firm's reputation, inherited sentiment should be reduced toward neutral.
+
 This ensures dependent responses are scored based on their actual referent rather than treated as standalone signals.
 
 Scope rules:
@@ -62,6 +67,14 @@ Scoring rules:
 - Score the NET reputational effect when both positives and negatives appear.
 - Use smaller magnitudes for weak signals.
 
+Weak-signal constraint:
+Indirect or ambient signals (e.g., list inclusion, casual mention, institutional context) must be scored with very small magnitudes.
+
+These signals should:
+- remain close to neutral (|sentiment| < 0.05)
+- carry low confidence
+- not be treated as directional reputation events
+
 Critical rule:
 If the event is relevant to "{FUND_NAME}", you MUST return a numeric sentiment score.
 
@@ -73,11 +86,17 @@ confidence = low but greater than 0.0
 Return null ONLY if the event is genuinely unrelated to "{FUND_NAME}" even after using thread and parent context.
 
 Prestige-list caution:
-If the firm appears in a list of firms or employers, do not automatically assume strong positive sentiment.
+If the firm appears in a list of firms, employers, or market participants:
 
-Treat such cases as:
-- mild positive if prestige is clearly implied
-- neutral (0.0) if it is merely factual inclusion
+- This may represent a weak prestige or salience signal
+- However, such signals are indirect and non-evaluative
+
+Scoring guidance:
+- If prestige is clearly implied but not evaluated, sentiment should typically fall between +0.01 and +0.05
+- Do NOT assign moderate or strong positive scores based on list inclusion alone
+- If the mention is purely factual or incidental, assign sentiment = 0.0
+
+List inclusion should almost never exceed +0.05 in magnitude unless additional evaluative context is present.
 
 Confidence guidance:
 
