@@ -9,9 +9,10 @@ Decide whether this specific EVENT TEXT is actually about "{FUND_NAME}" closely 
 Strict rules:
 - Focus on the EVENT TEXT, not the whole thread.
 - Use thread context only to resolve shorthand, pronouns, aliases, or indirect reference.
-- KEEP only if the EVENT TEXT itself clearly refers to "{FUND_NAME}" and would support firm-specific sentiment scoring.
-- DROP if the event is generic, weak, incidental, generic career chatter, or only loosely connected to the firm.
+- KEEP only if the EVENT TEXT itself clearly refers to "{FUND_NAME}" and contains enough interpretable firm-specific content to support downstream sentiment scoring.
+- DROP if the event is generic, weak, incidental, or only loosely connected to the firm.
 - DROP if the firm is discussed elsewhere in the thread but this EVENT TEXT itself is not clearly about the firm.
+- DROP if the EVENT TEXT refers to the firm but does not provide usable, interpretable firm-specific signal.
 - Prefer DROP over UNCERTAIN.
 - Use UNCERTAIN only if even after reading thread context you still genuinely cannot tell.
 
