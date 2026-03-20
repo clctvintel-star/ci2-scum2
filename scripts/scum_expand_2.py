@@ -421,32 +421,63 @@ def should_keep_thread_candidate(
     return True
 
 def build_ancestry_text(parent_id: str, parent_lookup: Dict[str, Dict], max_depth: int = 3) -> str:
+    """
+    Walks up the Reddit comment tree using full parent_id (t1_/t3_),
+    safely handling missing parents and always attempting to reach post-level context.
+    """
+
     texts = []
     current_id = parent_id
     seen = set()
+    steps = 0
 
-    for _ in range(max_depth):
-        if not current_id or current_id in seen:
+    while current_id and steps < max_depth:
+        if current_id in seen:
             break
-
         seen.add(current_id)
 
         node = parent_lookup.get(current_id)
+
+        # 🔴 CRITICAL FIX: if parent missing, STOP GRACEFULLY (don’t nuke everything)
         if not node:
             break
 
-        text = node.get("text", "")
-        if not text:
+        text = node.get("text")
+        if text:
+            texts.append(text)
+
+        next_parent = node.get("parent_id")
+
+        # 🔴 CRITICAL FIX: normalize parent_id if malformed
+        if isinstance(next_parent, str):
+            next_parent = next_parent.strip()
+            if next_parent.startswith("t1_") or next_parent.startswith("t3_"):
+                current_id = next_parent
+            else:
+                # attempt recovery if prefix missing
+                if len(next_parent) > 5:
+                    current_id = f"t1_{next_parent}"
+                else:
+                    break
+        else:
             break
 
-        texts.append(text)
+        steps += 1
 
-        current_id = node.get("parent_id")
+    # 🔴 CRITICAL FIX: if nothing found, return None early
+    if not texts:
+        return None
 
-    texts = list(dict.fromkeys(texts))
-    texts.reverse()
+    # remove duplicates but preserve order
+    seen_texts = []
+    for t in texts:
+        if t not in seen_texts:
+            seen_texts.append(t)
 
-    return "\n\n".join(texts)
+    # reverse → top-down context
+    seen_texts.reverse()
+
+    return "\n\n".join(seen_texts)
     
 # =========================================================
 # THREAD-LEVEL BUILD
