@@ -425,7 +425,9 @@ def build_ancestry_text(parent_id: str, parent_lookup: Dict[str, Dict], max_dept
     Walks up the Reddit comment tree using full parent_id (t1_/t3_),
     safely handling missing parents and always attempting to reach post-level context.
     """
-
+    if not parent_id or not isinstance(parent_id, str):
+        return None
+        
     texts = []
     current_id = parent_id
     seen = set()
@@ -636,7 +638,7 @@ def build_event_firm_pairs(
     for i, (_, row) in enumerate(events_df.iterrows(), start=1):
         raw_event_text = row["event_text"]
         post_id = row["post_id"]
-        parent_id = row["parent_id"]
+        parent_id = row["parent_id"] if pd.notna(row["parent_id"]) else None
 
         parent_text = build_ancestry_text(parent_id, parent_lookup, max_depth=3)
         thread_firms = thread_firm_map.get(post_id, [])
