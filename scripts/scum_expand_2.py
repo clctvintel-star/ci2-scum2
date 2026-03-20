@@ -63,6 +63,7 @@ EVENT_FIRM_REQUIRED_COLS = [
     "post_id",
     "comment_id",
     "parent_id",
+    "parent_text",
     "canonical_name",
     "matched_aliases",
     "candidate_source",
@@ -161,24 +162,38 @@ def build_alias_lookup(alias_patterns: List[Dict]) -> Dict[str, List[Tuple[str, 
         x["canonical_name"]: x["patterns"]
         for x in alias_patterns
     }
-
-
-def build_parent_lookup(events_df: pd.DataFrame) -> Dict[str, str]:
+    
+def build_parent_lookup(events_df: pd.DataFrame) -> Dict[str, Dict]:
     """
     Maps:
-    t1_commentid -> comment body
-    t3_postid -> post text
+      t1_<comment_id> -> {"text": comment_text, "parent_id": parent_id}
+      t3_<post_id>    -> {"text": post_text,    "parent_id": None}
+
+    Important:
+    - post text must come ONLY from the actual post row
+    - comment rows must NOT overwrite post text
     """
-    lookup = {}
+    lookup: Dict[str, Dict] = {}
 
     for _, row in events_df.iterrows():
-        event_id = row["event_id"]
-        text = row.get("event_text", "")
+        event_text = row.get("event_text", "")
+        parent_id = row.get("parent_id")
+        event_type = row.get("type")
 
-        if isinstance(event_id, str) and event_id.startswith("comment_"):
-            lookup[f"t1_{row['comment_id']}"] = text
-        elif isinstance(event_id, str) and event_id.startswith("post_"):
-            lookup[f"t3_{row['post_id']}"] = text
+        comment_id = row.get("comment_id")
+        post_id = row.get("post_id")
+
+        if event_type == "comment" and pd.notna(comment_id):
+            lookup[f"t1_{comment_id}"] = {
+                "text": event_text,
+                "parent_id": parent_id,
+            }
+
+        elif event_type == "post" and pd.notna(post_id):
+            lookup[f"t3_{post_id}"] = {
+                "text": event_text,
+                "parent_id": None,
+            }
 
     return lookup
 
@@ -405,7 +420,34 @@ def should_keep_thread_candidate(
 
     return True
 
+def build_ancestry_text(parent_id: str, parent_lookup: Dict[str, Dict], max_depth: int = 3) -> str:
+    texts = []
+    current_id = parent_id
+    seen = set()
 
+    for _ in range(max_depth):
+        if not current_id or current_id in seen:
+            break
+
+        seen.add(current_id)
+
+        node = parent_lookup.get(current_id)
+        if not node:
+            break
+
+        text = node.get("text", "")
+        if not text:
+            break
+
+        texts.append(text)
+
+        current_id = node.get("parent_id")
+
+    texts = list(dict.fromkeys(texts))
+    texts.reverse()
+
+    return "\n\n".join(texts)
+    
 # =========================================================
 # THREAD-LEVEL BUILD
 # =========================================================
@@ -563,15 +605,9 @@ def build_event_firm_pairs(
     for i, (_, row) in enumerate(events_df.iterrows(), start=1):
         raw_event_text = row["event_text"]
         post_id = row["post_id"]
-
         parent_id = row["parent_id"]
-        parent_text = parent_lookup.get(parent_id, "")
 
-        if parent_text:
-            event_text = f"[PARENT]\n{parent_text}\n\n[CHILD]\n{raw_event_text}"
-        else:
-            event_text = raw_event_text
-
+        parent_text = build_ancestry_text(parent_id, parent_lookup, max_depth=3)
         thread_firms = thread_firm_map.get(post_id, [])
 
         if not thread_firms:
@@ -582,7 +618,9 @@ def build_event_firm_pairs(
         for thread_firm in thread_firms:
             canonical_name = thread_firm["canonical_name"]
             firm_patterns = alias_lookup.get(canonical_name, [])
-            direct_aliases = regex_matches_for_firm(event_text, firm_patterns)
+
+            # direct match should be checked on the child event itself, not the stitched ancestry blob
+            direct_aliases = regex_matches_for_firm(raw_event_text, firm_patterns)
 
             if direct_aliases:
                 candidate_source = "direct_event_match"
@@ -597,12 +635,13 @@ def build_event_firm_pairs(
                 "event_id": row["event_id"],
                 "post_id": post_id,
                 "comment_id": row["comment_id"],
-                "parent_id": row["parent_id"],
+                "parent_id": parent_id,
+                "parent_text": parent_text if parent_text else None,
                 "canonical_name": canonical_name,
                 "matched_aliases": matched_aliases,
                 "candidate_source": candidate_source,
                 "event_has_direct_regex_match": event_has_direct_regex_match,
-                "event_text": event_text,
+                "event_text": raw_event_text,
                 "created_utc": row["created_utc"],
                 "depth": row["depth"],
                 "score": row["score"],
