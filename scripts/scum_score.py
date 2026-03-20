@@ -232,12 +232,9 @@ def resolve_input_file(explicit_path: Optional[str], directory: str, prefix: str
 def read_text(path: Path) -> str:
     return Path(path).read_text(encoding="utf-8")
 
-
 def atomic_write_parquet(df: pd.DataFrame, outfile: Path) -> Path:
     ensure_dir(outfile.parent)
-    tmp_path = outfile.with_suffix(outfile.suffix + ".tmp")
-    df.to_parquet(tmp_path, index=False)
-    tmp_path.replace(outfile)
+    df.to_parquet(outfile, index=False)
     return outfile
 
 
