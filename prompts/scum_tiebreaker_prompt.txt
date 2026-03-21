@@ -15,6 +15,21 @@ Use THREAD TITLE, THREAD TEXT, and PARENT TEXT only to resolve:
 
 Do NOT score the entire thread.
 
+CONTEXT-DEPENDENT RESPONSE RULE
+
+If the EVENT TEXT is brief, vague, or does not contain a clear standalone opinion:
+
+- Do NOT evaluate it independently.
+- Use PARENT TEXT as the primary source of meaning.
+- Treat the EVENT TEXT as modifying, reinforcing, questioning, reacting to, or narrowing the meaning of the PARENT TEXT.
+- If the PARENT TEXT provides clear directional sentiment about "{FUND_NAME}", inherit that direction and then adjust magnitude and confidence based on how strongly the EVENT TEXT reinforces or changes it.
+- If the EVENT TEXT weakens, hedges, narrows, questions, or partially distances itself from the PARENT TEXT, reduce magnitude toward neutral.
+- If the EVENT TEXT is merely reactive and does not actively engage with or modify the firm's reputation, inherited sentiment should remain very small or move to 0.0.
+- If the PARENT TEXT is missing, unclear, or not about "{FUND_NAME}", return sentiment = 0.0 with low confidence.
+
+Important:
+Do NOT amplify weak or incidental mentions from PARENT TEXT into meaningful sentiment.
+
 Score sentiment ABOUT "{FUND_NAME}" only.
 Do NOT score other firms unless comparison clearly changes perception of "{FUND_NAME}".
 
@@ -32,12 +47,23 @@ Critical rule:
 - Relevant but nondiagnostic rows should usually return sentiment = 0.0 with confidence > 0.0.
 - Return null only if the event is genuinely not about "{FUND_NAME}" even after using thread and parent context.
 
+Range usage rule:
+- Use the full -1.0 to 1.0 range when warranted.
+- Do not compress meaningful signals toward 0.0 just because they are subtle.
+- If "{FUND_NAME}" appears in an evaluative context, a score between -0.05 and +0.05 should be rare.
+- If the signal is real but mild, prefer roughly ±0.1 to ±0.3 rather than 0.0.
+- Use larger magnitudes such as ±0.6 to ±0.9 for clearly strong employer signals.
+- Reserve 0.0 for cases where the event is relevant but genuinely nondiagnostic rather than weakly directional.
+- Do not use low confidence as a reason to compress a directional sentiment score toward 0.0.
+
 Magnitude guidance:
 - Use small values for weak signals.
 - Do not exaggerate mild prestige mentions into strong positive sentiment.
 - Do not exaggerate vague criticism into strong negative sentiment.
+- If the event contains even a weak evaluative signal about "{FUND_NAME}", do not collapse it to 0.0. Use a small directional score instead.
 
 Confidence guidance:
+
 High confidence
 - explicit firm-specific reputational signal
 
