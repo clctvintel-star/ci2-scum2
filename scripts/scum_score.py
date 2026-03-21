@@ -101,7 +101,7 @@ def scum_score(sentiment: Optional[float], confidence: Optional[float]) -> Optio
     if sentiment is None or confidence is None:
         return None
     try:
-        return round(float(sentiment) * math.sqrt(float(confidence)), 4)
+        return round(float(sentiment) * (0.5 + 0.5 * float(confidence)), 4)
     except Exception:
         return None
 
