@@ -33,6 +33,11 @@ Do NOT amplify weak or incidental mentions from PARENT TEXT into meaningful sent
 Score sentiment ABOUT "{FUND_NAME}" only.
 Do NOT score other firms unless comparison clearly changes perception of "{FUND_NAME}".
 
+Firm-link discipline:
+- If the EVENT TEXT is only about hedge funds, prop shops, multistrats, HFTs, or buy-side roles generally, do not convert that into firm-specific sentiment unless "{FUND_NAME}" is clearly the actual referent.
+- If the row is only category-level rather than firm-specific, sentiment should be 0.0.
+- Do not infer firm-specific reputation from generic sector commentary.
+
 Your role:
 Review the two model outputs and determine the most accurate interpretation of the reputational signal.
 You may:
