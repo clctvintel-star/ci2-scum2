@@ -18,20 +18,20 @@ Do NOT score the whole thread.
 
 CONTEXT-DEPENDENT RESPONSE RULE
 
-If the EVENT TEXT is brief, vague, or does not contain a clear standalone opinion (e.g., short replies, acknowledgments, reactions, or statements that rely on prior context):
+If the EVENT TEXT is brief, vague, or does not contain a clear standalone opinion (for example: short replies, acknowledgments, reactions, clarifications, agreement, disagreement, or statements that rely on prior context):
 
-- Do NOT evaluate it independently
-- Use PARENT TEXT as the primary source of meaning and derive sentiment from it
-- Treat the EVENT TEXT as modifying, reinforcing, or reacting to the PARENT TEXT
-- If the PARENT TEXT provides clear directional sentiment about "{FUND_NAME}", inherit that direction (adjust magnitude and confidence as appropriate)
+- Do NOT evaluate it independently.
+- Use PARENT TEXT as the primary source of meaning.
+- Treat the EVENT TEXT as modifying, reinforcing, questioning, reacting to, or narrowing the meaning of the PARENT TEXT.
+- If the PARENT TEXT provides clear directional sentiment about "{FUND_NAME}", inherit that direction and then adjust magnitude and confidence based on how strongly the EVENT TEXT reinforces or changes it.
+- If the EVENT TEXT weakens, hedges, narrows, questions, or partially distances itself from the PARENT TEXT, reduce magnitude toward neutral.
+- If the EVENT TEXT is merely reactive and does not actively engage with or modify the firm's reputation, inherited sentiment should remain very small or move to 0.0.
 - If the PARENT TEXT is missing, unclear, or not about "{FUND_NAME}", return:
   sentiment = 0.0
   confidence = 0.1–0.2
 
 Important:
 Do NOT amplify weak or incidental mentions from PARENT TEXT into meaningful sentiment.
-
-If the EVENT TEXT does not actively engage with or modify the firm's reputation, inherited sentiment should be reduced toward neutral.
 
 This ensures dependent responses are scored based on their actual referent rather than treated as standalone signals.
 
@@ -45,8 +45,9 @@ Range usage rule:
 - Do not cluster meaningful signals near 0.0.
 - If "{FUND_NAME}" appears in an evaluative context, a score between -0.05 and +0.05 should be rare.
 - If the event conveys a real but mild reputational signal, prefer scores of roughly ±0.1 to ±0.3 rather than 0.0.
-- Use larger magnitudes such as ±0.6 to ±0.9 for clearly strong employer signals (for example: exceptional prestige, very high pay, elite selectivity, serious layoffs, toxic culture, no return offer, scandals, or unusually strong praise/criticism).
+- Use larger magnitudes such as ±0.6 to ±0.9 for clearly strong employer signals, for example: exceptional prestige, very high pay, elite selectivity, serious layoffs, toxic culture, no return offer, scandals, or unusually strong praise or criticism.
 - Reserve 0.0 for cases where the event is relevant but genuinely nondiagnostic rather than weakly positive or weakly negative.
+- Do not use low confidence as a reason to compress a directional sentiment score toward 0.0.
 
 Job-seeker framing:
 Signals that matter include:
@@ -74,14 +75,15 @@ Scoring rules:
 - Do not default to 0.0 merely because the signal is mild.
 - Score the NET reputational effect when both positives and negatives appear.
 - Use smaller magnitudes for weak signals.
+- If the event contains even a weak evaluative signal about "{FUND_NAME}", do not collapse it to 0.0. Use a small directional score instead.
 
 Weak-signal constraint:
-Indirect or ambient signals (e.g., list inclusion, casual mention, institutional context) must be scored with very small magnitudes.
+Indirect or ambient signals, for example list inclusion, casual mention, institutional context, or vague salience, must be scored with very small magnitudes.
 
 These signals should:
-- remain close to neutral (|sentiment| < 0.05)
+- remain close to neutral
 - carry low confidence
-- not be treated as directional reputation events
+- not be treated as strong directional reputation events
 
 Critical rule:
 If the event is relevant to "{FUND_NAME}", you MUST return a numeric sentiment score.
@@ -96,13 +98,13 @@ Return null ONLY if the event is genuinely unrelated to "{FUND_NAME}" even after
 Prestige-list caution:
 If the firm appears in a list of firms, employers, or market participants:
 
-- This may represent a weak prestige or salience signal
-- However, such signals are indirect and non-evaluative
+- This may represent a weak prestige or salience signal.
+- However, such signals are indirect and non-evaluative.
 
 Scoring guidance:
-- If prestige is clearly implied but not evaluated, sentiment should typically fall between +0.01 and +0.05
-- Do NOT assign moderate or strong positive scores based on list inclusion alone
-- If the mention is purely factual or incidental, assign sentiment = 0.0
+- If prestige is clearly implied but not directly evaluated, sentiment should typically fall between +0.01 and +0.05.
+- Do NOT assign moderate or strong positive scores based on list inclusion alone.
+- If the mention is purely factual or incidental, assign sentiment = 0.0.
 
 List inclusion should almost never exceed +0.05 in magnitude unless additional evaluative context is present.
 
