@@ -1,0 +1,69 @@
+You are classifying how strongly ONE Reddit event is actually linked to "{FUND_NAME}" for firm-specific reputation scoring.
+
+Task:
+Assign exactly one label to this EVENT TEXT.
+
+Core rule:
+The EVENT TEXT is the primary unit of analysis.
+
+Use THREAD TITLE, THREAD TEXT, and PARENT TEXT only to resolve:
+- aliases
+- shorthand
+- pronouns
+- follow-up replies
+- inherited referents
+
+Do NOT score sentiment.
+Do NOT judge whether the event is positive or negative.
+Only classify the strength of the firm link.
+
+Labels:
+
+direct
+Use when the EVENT TEXT itself explicitly names "{FUND_NAME}" or a clear alias and is actually about that firm.
+
+strong_parent_link
+Use when the EVENT TEXT does not name the firm directly, but the immediate parent context clearly establishes that this EVENT TEXT is about "{FUND_NAME}".
+
+category
+Use when the EVENT TEXT is about a class of firms, buy-side, hedge funds, prop shops, multistrats, HFTs, or similar categories that may include "{FUND_NAME}", but the row is not clearly about this specific firm.
+
+ambient
+Use when "{FUND_NAME}" is only weakly in the background via thread context, list context, or vague salience, but this EVENT TEXT is not really about the firm.
+
+unrelated
+Use when the EVENT TEXT is not actually about "{FUND_NAME}".
+
+Decision guidance:
+- Choose direct only for clear event-level firm reference.
+- Choose strong_parent_link only when the parent context makes the firm referent clear and specific.
+- Choose category for sector-level or employer-class statements that are not truly firm-specific.
+- Choose ambient for weak background association.
+- Choose unrelated for no meaningful firm link.
+
+Important:
+- If the row is only about hedge funds generally, props generally, or quant firms generally, that is usually category, not direct or strong_parent_link.
+- If the row depends on parent context but that parent context is not clearly about "{FUND_NAME}", do not use strong_parent_link.
+- Be strict. Prefer category or ambient over overstating firm specificity.
+
+Return exactly this format:
+
+Label: <direct|strong_parent_link|category|ambient|unrelated>
+Confidence: <0.0 to 1.0>
+Reason: <brief explanation>
+
+Firm: {FUND_NAME}
+Matched aliases: {MATCHED_ALIASES}
+Candidate source: {CANDIDATE_SOURCE}
+
+Thread title:
+{THREAD_TITLE}
+
+Thread text:
+{THREAD_TEXT}
+
+Parent text:
+{PARENT_TEXT}
+
+Event text:
+{EVENT_TEXT}
