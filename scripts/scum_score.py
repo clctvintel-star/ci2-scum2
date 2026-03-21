@@ -650,9 +650,9 @@ def call_and_parse_sentiment(
         if attempt > 0:
             effective_prompt = (
                 prompt
-                + "\n\nIMPORTANT: Return one complete valid JSON object only with keys "
+                + "\n\nIMPORTANT: Return ONLY a valid JSON object with keys "
                 + '"sentiment", "confidence", and "explanation". '
-                + "No markdown. No extra text."
+                + "No markdown. No text before or after."
             )
 
         raw = call_model(
