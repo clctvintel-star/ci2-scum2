@@ -650,11 +650,9 @@ def call_and_parse_sentiment(
         if attempt > 0:
             effective_prompt = (
                 prompt
-                + "\n\nIMPORTANT: Return only exactly this 3-line format:\n"
-                + "Label: <direct|strong_parent_link|category|ambient|unrelated>\n"
-                + "Confidence: <0.0 to 1.0>\n"
-                + "Reason: <brief explanation>\n"
-                + "No JSON. No markdown. No extra text.\n"
+                + "\n\nIMPORTANT: Return one complete valid JSON object only with keys "
+                + '"sentiment", "confidence", and "explanation". '
+                + "No markdown. No extra text."
             )
 
         raw = call_model(
