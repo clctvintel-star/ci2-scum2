@@ -29,6 +29,7 @@ models:
 
   score:
     relevance_filter: gpt-4o-mini
+    firm_link_filter: gpt-4o-mini
     uncertain_adjudicator: gpt-4o
     primary_a: claude-haiku-4-5
     primary_b: gpt-4o-mini
