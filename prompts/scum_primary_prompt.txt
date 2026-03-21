@@ -40,6 +40,14 @@ Scope rules:
 - Do NOT score other firms unless comparison clearly changes perception of "{FUND_NAME}".
 - A context row may still be relevant even if the EVENT TEXT does not repeat the firm name, if the broader thread clearly establishes the subject.
 
+Range usage rule:
+- Use the full -1.0 to 1.0 range when warranted.
+- Do not cluster meaningful signals near 0.0.
+- If "{FUND_NAME}" appears in an evaluative context, a score between -0.05 and +0.05 should be rare.
+- If the event conveys a real but mild reputational signal, prefer scores of roughly ±0.1 to ±0.3 rather than 0.0.
+- Use larger magnitudes such as ±0.6 to ±0.9 for clearly strong employer signals (for example: exceptional prestige, very high pay, elite selectivity, serious layoffs, toxic culture, no return offer, scandals, or unusually strong praise/criticism).
+- Reserve 0.0 for cases where the event is relevant but genuinely nondiagnostic rather than weakly positive or weakly negative.
+
 Job-seeker framing:
 Signals that matter include:
 - prestige
