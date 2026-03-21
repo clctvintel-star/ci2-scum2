@@ -124,6 +124,26 @@ def normalize_text_for_prefilter(text: Any) -> str:
 def token_count(text: str) -> int:
     return len(re.findall(r"\b\w+\b", safe_text(text)))
 
+def estimate_signal_strength(row: pd.Series) -> int:
+    text = safe_text(row.get("event_text"))
+    title = safe_text(row.get("thread_title"))
+    firm = row.get("canonical_name")
+
+    score = 0
+
+    # direct mention in event text = strongest
+    if text_contains_firm_name(text, firm):
+        score += 2
+
+    # mention only in thread title = weaker context
+    if text_contains_firm_name(title, firm):
+        score += 1
+
+    # longer content = more likely meaningful
+    if token_count(text) > 20:
+        score += 1
+
+    return score  # 0–4
 
 def current_utc_stamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
@@ -827,6 +847,7 @@ def main():
     df = prepare_scoring_df(event_df, thread_df)
     df = apply_filters(df, args).reset_index(drop=True)
     df["_row_key"] = build_row_key(df)
+    df["signal_strength"] = df.apply(estimate_signal_strength, axis=1)
 
     resume_df = load_resume_file(args.resume_from)
     if resume_df is not None:
@@ -1028,18 +1049,24 @@ def main():
             print("\n--- PRIMARY_B ABSTENTION NORMALIZED TO NEUTRAL ---")
             print(b_raw)
             print("--- END PRIMARY_B ---\n")
-
-        a_sc = scum_score(a_s, a_c)
-        b_sc = scum_score(b_s, b_c)
+        
+        sig = df.at[idx, "signal_strength"] or 0
+        scale = 0.5 + 0.5 * (sig / 4)  # 0.5 → 1.0
+        
+        adj_a_c = a_c * scale if a_c is not None else None
+        adj_b_c = b_c * scale if b_c is not None else None
+        
+        a_sc = scum_score(a_s, adj_a_c)
+        b_sc = scum_score(b_s, adj_b_c)
 
         df.at[idx, "primary_a_sentiment"] = a_s
-        df.at[idx, "primary_a_confidence"] = a_c
+        df.at[idx, "primary_a_confidence"] = adj_a_c
         df.at[idx, "primary_a_scum"] = a_sc
         df.at[idx, "primary_a_reason"] = a_reason
         df.at[idx, "primary_a_status"] = a_status
 
         df.at[idx, "primary_b_sentiment"] = b_s
-        df.at[idx, "primary_b_confidence"] = b_c
+        df.at[idx, "primary_b_confidence"] = adj_b_c
         df.at[idx, "primary_b_scum"] = b_sc
         df.at[idx, "primary_b_reason"] = b_reason
         df.at[idx, "primary_b_status"] = b_status
