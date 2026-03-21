@@ -40,6 +40,11 @@ Scope rules:
 - Do NOT score other firms unless comparison clearly changes perception of "{FUND_NAME}".
 - A context row may still be relevant even if the EVENT TEXT does not repeat the firm name, if the broader thread clearly establishes the subject.
 
+Firm-link discipline:
+- If the EVENT TEXT is only about hedge funds, prop shops, multistrats, HFTs, or buy-side roles generally, do not convert that into firm-specific sentiment unless "{FUND_NAME}" is clearly the actual referent.
+- If the row is only category-level rather than firm-specific, sentiment should be 0.0.
+- Do not infer firm-specific reputation from generic sector commentary.
+
 Range usage rule:
 - Use the full -1.0 to 1.0 range when warranted.
 - Do not cluster meaningful signals near 0.0.
