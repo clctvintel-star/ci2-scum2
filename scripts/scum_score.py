@@ -25,6 +25,8 @@ COMPLETED_REASON_SOURCES = {
     "tiebreaker",
     "primary_failure",
     "primary_avg_tiebreaker_failed",
+    "firm_link_category",
+    "firm_link_drop",
 }
 
 STATEFUL_COLUMNS = [
@@ -58,6 +60,10 @@ STATEFUL_COLUMNS = [
     "primary_a_raw",
     "primary_b_raw",
     "tiebreaker_raw",
+    "firm_link_label",
+    "firm_link_confidence",
+    "firm_link_reason",
+    "firm_link_raw",
 ]
 
 CHECKPOINT_COLUMNS = [
@@ -427,6 +433,39 @@ def parse_relevance_response(text: Any) -> Tuple[Optional[str], Optional[float],
             reason = safe_text(payload.get("reason") or payload.get("explanation") or payload.get("rationale")) or None
 
     return decision, confidence, reason
+    
+def parse_firm_link_response(text: Any) -> Tuple[Optional[str], Optional[float], Optional[str]]:
+    if not isinstance(text, str):
+        return None, None, None
+
+    label = None
+    confidence = None
+    reason = None
+
+    m = re.search(r"Label:\s*(direct|strong_parent_link|category|ambient|unrelated)", text, flags=re.IGNORECASE)
+    if m:
+        label = m.group(1).lower()
+
+    m = re.search(r"Confidence:\s*([0-9]*\.?[0-9]+)", text, flags=re.IGNORECASE)
+    if m:
+        confidence = clamp_float(m.group(1), 0.0, 1.0)
+
+    m = re.search(r"Reason:\s*(.+)", text, flags=re.IGNORECASE | re.DOTALL)
+    if m:
+        reason = m.group(1).strip()
+
+    if label in {"direct", "strong_parent_link", "category", "ambient", "unrelated"}:
+        return label, confidence, reason
+
+    payload = extract_json_payload(text)
+    if isinstance(payload, dict):
+        raw_label = safe_text(payload.get("label")).lower()
+        if raw_label in {"direct", "strong_parent_link", "category", "ambient", "unrelated"}:
+            label = raw_label
+            confidence = clamp_float(payload.get("confidence"), 0.0, 1.0)
+            reason = safe_text(payload.get("reason") or payload.get("explanation") or payload.get("rationale")) or None
+
+    return label, confidence, reason
 
 
 # ==========================================================
@@ -611,9 +650,11 @@ def call_and_parse_sentiment(
         if attempt > 0:
             effective_prompt = (
                 prompt
-                + "\n\nIMPORTANT: Return one complete valid JSON object only with keys "
-                + '"sentiment", "confidence", and "explanation". '
-                + "No markdown. No extra text."
+                + "\n\nIMPORTANT: Return only exactly this 3-line format:\n"
+                + "Label: <direct|strong_parent_link|category|ambient|unrelated>\n"
+                + "Confidence: <0.0 to 1.0>\n"
+                + "Reason: <brief explanation>\n"
+                + "No JSON. No markdown. No extra text.\n"
             )
 
         raw = call_model(
@@ -678,6 +719,48 @@ def call_and_parse_relevance(
 
     return None, None, None, last_raw
 
+def call_and_parse_firm_link(
+    prompt: str,
+    anthropic_client,
+    openai_client,
+    gemini_client,
+    model_name: str,
+    max_tokens: int = 120,
+    temperature: float = 0.0,
+    retry_limit: int = 3,
+    semantic_retry_limit: int = 2,
+) -> Tuple[Optional[str], Optional[float], Optional[str], str]:
+    last_raw = ""
+
+    for attempt in range(semantic_retry_limit):
+        effective_prompt = prompt
+        if attempt > 0:
+            effective_prompt = (
+                prompt
+                + "\n\nIMPORTANT: Return only exactly this format:\n"
+                + "Label: direct or strong_parent_link or category or ambient or unrelated\n"
+                + "Confidence: 0.0-1.0\n"
+                + "Reason: ...\n"
+            )
+
+        raw = call_model(
+            model_name=model_name,
+            prompt=effective_prompt,
+            anthropic_client=anthropic_client,
+            openai_client=openai_client,
+            gemini_client=gemini_client,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            retry_limit=retry_limit,
+        )
+
+        last_raw = raw
+        label, confidence, reason = parse_firm_link_response(raw)
+
+        if label in {"direct", "strong_parent_link", "category", "ambient", "unrelated"}:
+            return label, confidence, reason, raw
+
+    return None, None, None, last_raw
 
 # ==========================================================
 # prompt payload
@@ -837,6 +920,8 @@ def main():
 
     relevance_prompt_path = Path("prompts/event_firm_relevance_prompt.txt")
     relevance_prompt = read_text(relevance_prompt_path) if relevance_prompt_path.exists() else None
+    firm_link_prompt_path = Path("prompts/event_firm_link_prompt.txt")
+    firm_link_prompt = read_text(firm_link_prompt_path) if firm_link_prompt_path.exists() else None
 
     event_file = resolve_input_file(args.event_file, paths["event_firm_dir"], "event_firm_pairs")
     thread_file = resolve_input_file(args.thread_file, paths["thread_firm_dir"], "thread_firm_pairs")
@@ -902,6 +987,7 @@ def main():
     primary_b_model = settings["models"]["score"]["primary_b"]
     tiebreaker_model = settings["models"]["score"]["tiebreaker"]
     relevance_model = settings["models"]["score"].get("relevance_filter", primary_b_model)
+    firm_link_model = settings["models"]["score"].get("firm_link_filter", "gpt-4o-mini")
 
     rows_since_checkpoint = 0
     rows_since_full_autosave = 0
@@ -1009,9 +1095,83 @@ def main():
                         rows_since_full_autosave = 0
 
                     continue
+                    
+        if firm_link_prompt:
+            link_text = firm_link_prompt.format_map(payload)
+            fl_label, fl_conf, fl_reason, fl_raw = call_and_parse_firm_link(
+                link_text,
+                anthropic_client,
+                openai_client,
+                gemini_client,
+                model_name=firm_link_model,
+                retry_limit=retry_limit,
+            )
+
+            df.at[idx, "firm_link_label"] = fl_label
+            df.at[idx, "firm_link_confidence"] = fl_conf
+            df.at[idx, "firm_link_reason"] = fl_reason
+
+            if args.debug_save_raw:
+                df.at[idx, "firm_link_raw"] = fl_raw
+
+            if fl_label in {"ambient", "unrelated"}:
+                df.at[idx, "final_sentiment"] = 0.0
+                df.at[idx, "final_confidence"] = 0.0
+                df.at[idx, "final_scum"] = 0.0
+                df.at[idx, "final_reason"] = fl_reason
+                df.at[idx, "final_reason_source"] = "firm_link_drop"
+
+                print(
+                    f"[{counter}/{total_pending}] {event_key} | {row['canonical_name']} | "
+                    f"source={row['source_bucket']} | FIRM_LINK_DROP | "
+                    f"label={fl_label} | conf={fl_conf} | reason={short_reason(fl_reason)}"
+                )
+
+                rows_since_checkpoint += 1
+                rows_since_full_autosave += 1
+
+                if rows_since_checkpoint >= checkpoint_every:
+                    outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix="scored_events")
+                    print(f"CHECKPOINT SAVED: {outfile}")
+                    rows_since_checkpoint = 0
+
+                if rows_since_full_autosave >= full_autosave_every:
+                    outfile = save_df_clean(df, paths["scored_events_dir"], prefix="scored_events")
+                    print(f"FULL AUTOSAVED: {outfile}")
+                    rows_since_full_autosave = 0
+
+                continue
+
+            if fl_label == "category":
+                df.at[idx, "final_sentiment"] = 0.0
+                df.at[idx, "final_confidence"] = 0.1
+                df.at[idx, "final_scum"] = 0.0
+                df.at[idx, "final_reason"] = fl_reason
+                df.at[idx, "final_reason_source"] = "firm_link_category"
+
+                print(
+                    f"[{counter}/{total_pending}] {event_key} | {row['canonical_name']} | "
+                    f"source={row['source_bucket']} | FIRM_LINK_CATEGORY | "
+                    f"label={fl_label} | conf={fl_conf} | reason={short_reason(fl_reason)}"
+                )
+
+                rows_since_checkpoint += 1
+                rows_since_full_autosave += 1
+
+                if rows_since_checkpoint >= checkpoint_every:
+                    outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix="scored_events")
+                    print(f"CHECKPOINT SAVED: {outfile}")
+                    rows_since_checkpoint = 0
+
+                if rows_since_full_autosave >= full_autosave_every:
+                    outfile = save_df_clean(df, paths["scored_events_dir"], prefix="scored_events")
+                    print(f"FULL AUTOSAVED: {outfile}")
+                    rows_since_full_autosave = 0
+
+                continue
 
         prompt = primary_prompt.format_map(payload)
-
+        
         a_s, a_c, a_reason, a_raw, a_status = call_and_parse_sentiment(
             primary_a_model,
             prompt,
