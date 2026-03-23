@@ -222,6 +222,7 @@ def parse_args():
     parser.add_argument("--event-file", type=str, default=None)
     parser.add_argument("--thread-file", type=str, default=None)
     parser.add_argument("--resume-from", type=str, default=None)
+    parser.add_argument("--output-prefix", type=str, default="scored_events")
 
     parser.add_argument("--show-latest-files", action="store_true")
     parser.add_argument("--debug-primary-a", action="store_true")
@@ -969,8 +970,8 @@ def main():
 
     if len(pending_indices) == 0:
         print("Nothing left to score.")
-        checkpoint_outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix="scored_events")
-        latest_outfile = save_df_clean(df, paths["scored_events_dir"], prefix="scored_events")
+        checkpoint_outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix=args.output_prefix)
+        latest_outfile = save_df_clean(df, paths["scored_events_dir"], prefix=args.output_prefix)
         print("Latest checkpoint save:", checkpoint_outfile)
         print("Latest rolling save:", latest_outfile)
         return
@@ -1020,12 +1021,12 @@ def main():
                 rows_since_full_autosave += 1
 
                 if rows_since_checkpoint >= checkpoint_every:
-                    outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix="scored_events")
+                    outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix=args.output_prefix)
                     print(f"CHECKPOINT SAVED: {outfile}")
                     rows_since_checkpoint = 0
 
                 if rows_since_full_autosave >= full_autosave_every:
-                    outfile = save_df_clean(df, paths["scored_events_dir"], prefix="scored_events")
+                    outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix=args.output_prefix)
                     print(f"FULL AUTOSAVED: {outfile}")
                     rows_since_full_autosave = 0
 
@@ -1083,12 +1084,12 @@ def main():
                     rows_since_full_autosave += 1
 
                     if rows_since_checkpoint >= checkpoint_every:
-                        outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix="scored_events")
+                        outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix=args.output_prefix)
                         print(f"CHECKPOINT SAVED: {outfile}")
                         rows_since_checkpoint = 0
 
                     if rows_since_full_autosave >= full_autosave_every:
-                        outfile = save_df_clean(df, paths["scored_events_dir"], prefix="scored_events")
+                        outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix=args.output_prefix)
                         print(f"FULL AUTOSAVED: {outfile}")
                         rows_since_full_autosave = 0
 
@@ -1129,12 +1130,12 @@ def main():
                 rows_since_full_autosave += 1
 
                 if rows_since_checkpoint >= checkpoint_every:
-                    outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix="scored_events")
+                    outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix=args.output_prefix)
                     print(f"CHECKPOINT SAVED: {outfile}")
                     rows_since_checkpoint = 0
 
                 if rows_since_full_autosave >= full_autosave_every:
-                    outfile = save_df_clean(df, paths["scored_events_dir"], prefix="scored_events")
+                    outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix=args.output_prefix)
                     print(f"FULL AUTOSAVED: {outfile}")
                     rows_since_full_autosave = 0
 
@@ -1157,12 +1158,12 @@ def main():
                 rows_since_full_autosave += 1
 
                 if rows_since_checkpoint >= checkpoint_every:
-                    outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix="scored_events")
+                    outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix=args.output_prefix)
                     print(f"CHECKPOINT SAVED: {outfile}")
                     rows_since_checkpoint = 0
 
                 if rows_since_full_autosave >= full_autosave_every:
-                    outfile = save_df_clean(df, paths["scored_events_dir"], prefix="scored_events")
+                    outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix=args.output_prefix)
                     print(f"FULL AUTOSAVED: {outfile}")
                     rows_since_full_autosave = 0
 
@@ -1266,12 +1267,12 @@ def main():
             rows_since_full_autosave += 1
 
             if rows_since_checkpoint >= checkpoint_every:
-                outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix="scored_events")
+                outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix=args.output_prefix)
                 print(f"CHECKPOINT SAVED: {outfile}")
                 rows_since_checkpoint = 0
 
             if rows_since_full_autosave >= full_autosave_every:
-                outfile = save_df_clean(df, paths["scored_events_dir"], prefix="scored_events")
+                outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix=args.output_prefix)
                 print(f"FULL AUTOSAVED: {outfile}")
                 rows_since_full_autosave = 0
 
@@ -1353,18 +1354,18 @@ def main():
         rows_since_full_autosave += 1
 
         if rows_since_checkpoint >= checkpoint_every:
-            outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix="scored_events")
+            outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix=args.output_prefix)
             print(f"CHECKPOINT SAVED: {outfile}")
             rows_since_checkpoint = 0
 
         if rows_since_full_autosave >= full_autosave_every:
-            outfile = save_df_clean(df, paths["scored_events_dir"], prefix="scored_events")
+            outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix=args.output_prefix)
             print(f"FULL AUTOSAVED: {outfile}")
             rows_since_full_autosave = 0
 
-    checkpoint_outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix="scored_events")
-    latest_outfile = save_df_clean(df, paths["scored_events_dir"], prefix="scored_events")
-    final_outfile = save_final_df(df, paths["scored_events_dir"], prefix="scored_events")
+    checkpoint_outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix=args.output_prefix)
+    latest_outfile = save_df_clean(df, paths["scored_events_dir"], prefix=args.output_prefix)
+    final_outfile = save_final_df(df, paths["scored_events_dir"], prefix=args.output_prefix)
 
     print("\nLatest checkpoint save:", checkpoint_outfile)
     print("Latest rolling save:", latest_outfile)
