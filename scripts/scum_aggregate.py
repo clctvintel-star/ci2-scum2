@@ -11,6 +11,9 @@ INPUT_FILE = "/content/drive/MyDrive/CI2/db/scum2/scored_events/scored_events_di
 POST_DAYS_OUT = "/content/drive/MyDrive/CI2/db/scum2/post_days/post_days_latest.parquet"
 FUND_DAYS_OUT = "/content/drive/MyDrive/CI2/db/scum2/fund_days/fund_days_latest.parquet"
 
+POS_THRESHOLD = 0.10
+NEG_THRESHOLD = -0.10
+
 
 # ============================================
 # HELPERS
@@ -25,12 +28,44 @@ def safe_series(df, col, default=0):
 def add_rolling(group):
     group = group.sort_values("date").copy()
 
+    # SCUM rolling
     group["ma28"] = group["mean_scum"].rolling(
         window=28,
         min_periods=7
     ).mean()
 
     group["ma90"] = group["mean_scum"].rolling(
+        window=90,
+        min_periods=21
+    ).mean()
+
+    # DSR rolling
+    group["dsr_pos_ma28"] = group["dsr_pos"].rolling(
+        window=28,
+        min_periods=7
+    ).mean()
+
+    group["dsr_neg_ma28"] = group["dsr_neg"].rolling(
+        window=28,
+        min_periods=7
+    ).mean()
+
+    group["dsr_net_ma28"] = group["dsr_net"].rolling(
+        window=28,
+        min_periods=7
+    ).mean()
+
+    group["dsr_pos_ma90"] = group["dsr_pos"].rolling(
+        window=90,
+        min_periods=21
+    ).mean()
+
+    group["dsr_neg_ma90"] = group["dsr_neg"].rolling(
+        window=90,
+        min_periods=21
+    ).mean()
+
+    group["dsr_net_ma90"] = group["dsr_net"].rolling(
         window=90,
         min_periods=21
     ).mean()
@@ -56,7 +91,6 @@ print("Scored rows:", len(df))
 # BASIC CLEAN
 # ============================================
 
-# required fields check
 required_cols = ["canonical_name", "post_id", "created_utc", "final_scum"]
 missing = [c for c in required_cols if c not in df.columns]
 if missing:
@@ -71,12 +105,19 @@ df = df[df["date"].notna()].copy()
 # robust engagement proxy
 score = safe_series(df, "score", default=0)
 num_comments = safe_series(df, "num_comments", default=0)
-
 df["engagement"] = (score + num_comments).clip(lower=0)
 
 # fallback event_id if missing
 if "event_id" not in df.columns:
     df["event_id"] = df.index.astype(str)
+
+# ============================================
+# DSR FLAGS
+# ============================================
+
+df["pos_signal"] = (df["final_scum"] >= POS_THRESHOLD).astype(int)
+df["neg_signal"] = (df["final_scum"] <= NEG_THRESHOLD).astype(int)
+df["net_signal"] = df["pos_signal"] - df["neg_signal"]
 
 
 # ============================================
@@ -89,8 +130,15 @@ post_days = (
         post_scum=("final_scum", "mean"),
         event_count=("event_id", "count"),
         engagement=("engagement", "sum"),
+        pos_event_count=("pos_signal", "sum"),
+        neg_event_count=("neg_signal", "sum"),
+        net_signal_sum=("net_signal", "sum"),
     )
 )
+
+post_days["dsr_pos"] = post_days["pos_event_count"] / post_days["event_count"]
+post_days["dsr_neg"] = post_days["neg_event_count"] / post_days["event_count"]
+post_days["dsr_net"] = post_days["dsr_pos"] - post_days["dsr_neg"]
 
 print("Post-days rows:", len(post_days))
 
@@ -107,8 +155,15 @@ fund_days = (
         post_count=("post_id", "count"),
         event_count=("event_count", "sum"),
         engagement=("engagement", "sum"),
+        pos_event_count=("pos_event_count", "sum"),
+        neg_event_count=("neg_event_count", "sum"),
+        net_signal_sum=("net_signal_sum", "sum"),
     )
 )
+
+fund_days["dsr_pos"] = fund_days["pos_event_count"] / fund_days["event_count"]
+fund_days["dsr_neg"] = fund_days["neg_event_count"] / fund_days["event_count"]
+fund_days["dsr_net"] = fund_days["dsr_pos"] - fund_days["dsr_neg"]
 
 
 # ============================================
@@ -150,7 +205,7 @@ fund_days = fund_days.sort_values(["canonical_name", "date"]).reset_index(drop=T
 # ============================================
 
 fund_days = (
-    fund_days.groupby("canonical_name", group_keys=False)
+    fund_days.groupby("canonical_name", group_keys=False)[fund_days.columns]
     .apply(add_rolling)
     .reset_index(drop=True)
 )
@@ -175,9 +230,16 @@ print("Fund days ->", FUND_DAYS_OUT)
 # QUICK STATS
 # ============================================
 
-print("\nFund summary:")
+print("\nFund summary (mean_scum):")
 print(
     fund_days.groupby("canonical_name")["mean_scum"]
+    .mean()
+    .sort_values(ascending=False)
+)
+
+print("\nFund summary (dsr_net):")
+print(
+    fund_days.groupby("canonical_name")["dsr_net"]
     .mean()
     .sort_values(ascending=False)
 )
