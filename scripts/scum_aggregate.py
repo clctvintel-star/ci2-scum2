@@ -13,10 +13,36 @@ FUND_DAYS_OUT = "/content/drive/MyDrive/CI2/db/scum2/fund_days/fund_days_latest.
 
 
 # ============================================
+# HELPERS
+# ============================================
+
+def safe_series(df, col, default=0):
+    if col in df.columns:
+        return pd.to_numeric(df[col], errors="coerce").fillna(default)
+    return pd.Series(default, index=df.index, dtype="float64")
+
+
+def add_rolling(group):
+    group = group.sort_values("date").copy()
+
+    group["ma28"] = group["mean_scum"].rolling(
+        window=28,
+        min_periods=7
+    ).mean()
+
+    group["ma90"] = group["mean_scum"].rolling(
+        window=90,
+        min_periods=21
+    ).mean()
+
+    return group
+
+
+# ============================================
 # LOAD
 # ============================================
 
-df = pd.read_parquet(INPUT_FILE)
+df = pd.read_parquet(INPUT_FILE).copy()
 
 print("Loaded rows:", len(df))
 
@@ -30,36 +56,41 @@ print("Scored rows:", len(df))
 # BASIC CLEAN
 # ============================================
 
-df["date"] = pd.to_datetime(df["created_utc"], unit="s").dt.date
+# required fields check
+required_cols = ["canonical_name", "post_id", "created_utc", "final_scum"]
+missing = [c for c in required_cols if c not in df.columns]
+if missing:
+    raise ValueError(f"Missing required columns: {missing}")
 
-# engagement proxy
-df["engagement"] = (
-    df.get("score", 0).fillna(0)
-    + df.get("num_comments", 0).fillna(0)
-)
+df["final_scum"] = pd.to_numeric(df["final_scum"], errors="coerce")
+df = df[df["final_scum"].notna()].copy()
 
-df["engagement"] = df["engagement"].clip(lower=0)
+df["date"] = pd.to_datetime(df["created_utc"], unit="s", errors="coerce").dt.date
+df = df[df["date"].notna()].copy()
+
+# robust engagement proxy
+score = safe_series(df, "score", default=0)
+num_comments = safe_series(df, "num_comments", default=0)
+
+df["engagement"] = (score + num_comments).clip(lower=0)
+
+# fallback event_id if missing
+if "event_id" not in df.columns:
+    df["event_id"] = df.index.astype(str)
 
 
 # ============================================
 # POST-LEVEL AGGREGATION
 # ============================================
 
-post_group = df.groupby(
-    ["canonical_name", "post_id", "date"],
-    as_index=False
+post_days = (
+    df.groupby(["canonical_name", "post_id", "date"], as_index=False)
+    .agg(
+        post_scum=("final_scum", "mean"),
+        event_count=("event_id", "count"),
+        engagement=("engagement", "sum"),
+    )
 )
-
-post_days = post_group.agg({
-    "final_scum": "mean",
-    "event_id": "count",
-    "engagement": "sum"
-})
-
-post_days.rename(columns={
-    "final_scum": "post_scum",
-    "event_id": "event_count"
-}, inplace=True)
 
 print("Post-days rows:", len(post_days))
 
@@ -68,22 +99,16 @@ print("Post-days rows:", len(post_days))
 # FUND-DAY AGGREGATION
 # ============================================
 
-fund_group = post_days.groupby(
-    ["canonical_name", "date"],
-    as_index=False
+fund_days = (
+    post_days.groupby(["canonical_name", "date"], as_index=False)
+    .agg(
+        mean_scum=("post_scum", "mean"),
+        median_scum=("post_scum", "median"),
+        post_count=("post_id", "count"),
+        event_count=("event_count", "sum"),
+        engagement=("engagement", "sum"),
+    )
 )
-
-fund_days = fund_group.agg({
-    "post_scum": "mean",
-    "post_id": "count",
-    "event_count": "sum",
-    "engagement": "sum"
-})
-
-fund_days.rename(columns={
-    "post_scum": "mean_scum",
-    "post_id": "post_count"
-}, inplace=True)
 
 
 # ============================================
@@ -93,13 +118,13 @@ fund_days.rename(columns={
 weighted = post_days.copy()
 weighted["weighted_scum"] = weighted["post_scum"] * weighted["engagement"]
 
-weighted_group = weighted.groupby(
-    ["canonical_name", "date"],
-    as_index=False
-).agg({
-    "weighted_scum": "sum",
-    "engagement": "sum"
-})
+weighted_group = (
+    weighted.groupby(["canonical_name", "date"], as_index=False)
+    .agg(
+        weighted_scum=("weighted_scum", "sum"),
+        engagement=("engagement", "sum"),
+    )
+)
 
 weighted_group["engagement_weighted_scum"] = (
     weighted_group["weighted_scum"] /
@@ -117,32 +142,18 @@ fund_days = fund_days.merge(
 # SORT
 # ============================================
 
-fund_days = fund_days.sort_values(["canonical_name", "date"])
+fund_days = fund_days.sort_values(["canonical_name", "date"]).reset_index(drop=True)
 
 
 # ============================================
 # ROLLING AVERAGES
 # ============================================
 
-def add_rolling(group):
-    group = group.sort_values("date")
-
-    group["ma28"] = group["mean_scum"].rolling(
-        window=28,
-        min_periods=7
-    ).mean()
-
-    group["ma90"] = group["mean_scum"].rolling(
-        window=90,
-        min_periods=21
-    ).mean()
-
-    return group
-
-fund_days = fund_days.groupby(
-    "canonical_name",
-    group_keys=False
-).apply(add_rolling)
+fund_days = (
+    fund_days.groupby("canonical_name", group_keys=False)
+    .apply(add_rolling)
+    .reset_index(drop=True)
+)
 
 
 # ============================================
@@ -156,8 +167,8 @@ post_days.to_parquet(POST_DAYS_OUT, index=False)
 fund_days.to_parquet(FUND_DAYS_OUT, index=False)
 
 print("\nSaved:")
-print("Post days →", POST_DAYS_OUT)
-print("Fund days →", FUND_DAYS_OUT)
+print("Post days ->", POST_DAYS_OUT)
+print("Fund days ->", FUND_DAYS_OUT)
 
 
 # ============================================
@@ -170,3 +181,10 @@ print(
     .mean()
     .sort_values(ascending=False)
 )
+
+print("\nDate range:")
+print(fund_days["date"].min(), "to", fund_days["date"].max())
+
+print("\nRows:")
+print("post_days:", len(post_days))
+print("fund_days:", len(fund_days))
