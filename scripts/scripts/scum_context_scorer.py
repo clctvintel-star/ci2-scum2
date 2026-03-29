@@ -916,11 +916,9 @@ def main():
 
     primary_prompt = read_text(Path("prompts/scum_primary_prompt.txt"))
     tie_prompt = read_text(Path("prompts/scum_tiebreaker_prompt.txt"))
-
-    relevance_prompt_path = Path("prompts/event_firm_relevance_prompt.txt")
-    relevance_prompt = read_text(relevance_prompt_path) if relevance_prompt_path.exists() else None
-    firm_link_prompt_path = Path("prompts/event_firm_link_prompt.txt")
-    firm_link_prompt = read_text(firm_link_prompt_path) if firm_link_prompt_path.exists() else None
+    
+    relevance_prompt = None
+    firm_link_prompt = None
 
     event_file = resolve_input_file(args.event_file, paths["event_firm_dir"], "event_firm_pairs")
     thread_file = resolve_input_file(args.thread_file, paths["thread_firm_dir"], "thread_firm_pairs")
