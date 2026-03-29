@@ -31,7 +31,11 @@ models:
     relevance_filter: gpt-4o-mini
     firm_link_filter: gpt-4o-mini
     uncertain_adjudicator: gpt-4o
-    primary_a: claude-haiku-4-5
+    #primary_a: claude-haiku-4-5
+    #primary_b: gpt-4o-mini
+    #tiebreaker: gpt-4o
+    #using below for context test
+    primary_a: gemini-1.5-flash
     primary_b: gpt-4o-mini
     tiebreaker: gpt-4o
 
