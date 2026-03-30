@@ -539,7 +539,6 @@ def call_anthropic(
             time.sleep(1)
     raise RuntimeError(f"Anthropic failed for {model_name}: {last_err}")
 
-
 def call_openai(
     client,
     model_name: str,
@@ -555,12 +554,21 @@ def call_openai(
                 model=model_name,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                response_format={"type": "json_object"},  # 🔥 THIS IS THE FIX
                 messages=[{"role": "user", "content": prompt}],
             )
-            return r.choices[0].message.content or ""
+
+            content = r.choices[0].message.content
+
+            if isinstance(content, dict):
+                return json.dumps(content)
+
+            return content or ""
+
         except Exception as e:
             last_err = e
             time.sleep(1)
+
     raise RuntimeError(f"OpenAI failed for {model_name}: {last_err}")
 
 def call_gemini(
@@ -1362,7 +1370,10 @@ def main():
                 model_b_sentiment=b_s,
                 model_b_confidence=b_c,
             )
-            t_prompt = tie_prompt.format_map(tie_payload)
+            t_prompt = tie_prompt.replace("{", "{{").replace("}", "}}")
+            for k in tie_payload:
+                t_prompt = t_prompt.replace("{{" + k + "}}", "{" + k + "}")
+            t_prompt = t_prompt.format_map(tie_payload)
 
             t_s, t_c, t_reason, t_raw, t_status = call_and_parse_sentiment(
                 tiebreaker_model,
