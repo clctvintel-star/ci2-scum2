@@ -173,10 +173,10 @@ No extra text.
 
 Return exactly:
 
-{{
-“sentiment”: -0.5,
-“confidence”: 0.7,
-“explanation”: “brief explanation”
+{{ 
+"sentiment": -0.5,
+"confidence": 0.7,
+"explanation": "brief explanation"
 }}
 
 ⸻
