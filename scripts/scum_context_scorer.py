@@ -575,7 +575,6 @@ def call_openai(
 
     raise RuntimeError(f"OpenAI failed for {model_name}: {last_err}")
 
-
 def call_gemini(
     client,
     model_name: str,
@@ -598,23 +597,38 @@ def call_gemini(
                 },
             )
 
-            if hasattr(r, "text") and r.text:
+            # 1) direct text (best case)
+            if getattr(r, "text", None):
                 return r.text
 
-            if hasattr(r, "candidates") and r.candidates:
+            # 2) candidate parts (normal case)
+            if getattr(r, "candidates", None):
                 texts = []
                 for cand in r.candidates:
                     content = getattr(cand, "content", None)
-                    parts = getattr(content, "parts", None) if content is not None else None
+                    parts = getattr(content, "parts", None) if content else None
+
                     if parts:
                         for part in parts:
                             txt = getattr(part, "text", None)
                             if txt:
                                 texts.append(txt)
+
                 if texts:
                     return "\n".join(texts).strip()
 
-            raise ValueError(f"No valid text in Gemini response: {r}")
+            # 🔥 3) salvage MAX_TOKENS cases
+            if getattr(r, "candidates", None):
+                cand = r.candidates[0]
+                finish = getattr(cand, "finish_reason", None)
+
+                if str(finish) == "MAX_TOKENS":
+                    # return whatever exists, even if partial
+                    raw = str(r)
+                    if "{" in raw:
+                        return raw
+
+            last_err = f"No usable text. Finish reason: {finish}"
 
         except Exception as e:
             last_err = e
