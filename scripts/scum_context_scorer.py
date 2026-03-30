@@ -579,16 +579,25 @@ def call_gemini(
                     "temperature": temperature,
                     "max_output_tokens": max_tokens,
                     "response_mime_type": "application/json",
-                    "thinking_config": {
-                        "thinking_budget": 0
-                    },
                 },
             )
-            text = getattr(r, "text", None)
-            return text or str(r)
+
+            # 🔥 HARD REQUIREMENT: extract text ONLY from candidates
+            if hasattr(r, "candidates") and r.candidates:
+                parts = r.candidates[0].content.parts
+                if parts and hasattr(parts[0], "text"):
+                    return parts[0].text
+
+            # fallback ONLY if clean text exists
+            if hasattr(r, "text") and r.text:
+                return r.text
+
+            raise ValueError("No valid text in Gemini response")
+
         except Exception as e:
             last_err = e
             time.sleep(1)
+
     raise RuntimeError(f"Gemini failed for {model_name}: {last_err}")
 
 def call_model(
