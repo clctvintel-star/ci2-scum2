@@ -132,26 +132,6 @@ def normalize_text_for_prefilter(text: Any) -> str:
 def token_count(text: str) -> int:
     return len(re.findall(r"\b\w+\b", safe_text(text)))
 
-def estimate_signal_strength(row: pd.Series) -> int:
-    text = safe_text(row.get("event_text"))
-    title = safe_text(row.get("thread_title"))
-    firm = row.get("canonical_name")
-
-    score = 0
-
-    # direct mention in event text = strongest
-    if text_contains_firm_name(text, firm):
-        score += 2
-
-    # mention only in thread title = weaker context
-    if text_contains_firm_name(title, firm):
-        score += 1
-
-    # longer content = more likely meaningful
-    if token_count(text) > 20:
-        score += 1
-
-    return score  # 0–4
 
 def current_utc_stamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
@@ -170,6 +150,25 @@ def text_contains_firm_name(text: Any, firm_name: Any) -> bool:
     if not norm_firm:
         return False
     return f" {norm_firm} " in norm_text
+
+
+def estimate_signal_strength(row: pd.Series) -> int:
+    text = safe_text(row.get("event_text"))
+    title = safe_text(row.get("thread_title"))
+    firm = row.get("canonical_name")
+
+    score = 0
+
+    if text_contains_firm_name(text, firm):
+        score += 2
+
+    if text_contains_firm_name(title, firm):
+        score += 1
+
+    if token_count(text) > 20:
+        score += 1
+
+    return score
 
 
 def should_rescue_by_thread_title(row: pd.Series) -> bool:
@@ -261,6 +260,11 @@ def resolve_input_file(explicit_path: Optional[str], directory: str, prefix: str
 def read_text(path: Path) -> str:
     return Path(path).read_text(encoding="utf-8")
 
+
+def read_text_if_exists(path: Path) -> Optional[str]:
+    return path.read_text(encoding="utf-8") if path.exists() else None
+
+
 def atomic_write_parquet(df: pd.DataFrame, outfile: Path) -> Path:
     ensure_dir(outfile.parent)
     df.to_parquet(outfile, index=False)
@@ -351,7 +355,6 @@ def extract_json_payload(text: Any) -> Optional[Dict[str, Any]]:
         payload = json.loads(text)
         if isinstance(payload, dict):
             return {k.lower(): v for k, v in payload.items()}
-  
     except Exception:
         pass
 
@@ -437,7 +440,8 @@ def parse_relevance_response(text: Any) -> Tuple[Optional[str], Optional[float],
             reason = safe_text(payload.get("reason") or payload.get("explanation") or payload.get("rationale")) or None
 
     return decision, confidence, reason
-    
+
+
 def parse_firm_link_response(text: Any) -> Tuple[Optional[str], Optional[float], Optional[str]]:
     if not isinstance(text, str):
         return None, None, None
@@ -540,6 +544,7 @@ def call_anthropic(
             time.sleep(1)
     raise RuntimeError(f"Anthropic failed for {model_name}: {last_err}")
 
+
 def call_openai(
     client,
     model_name: str,
@@ -555,15 +560,13 @@ def call_openai(
                 model=model_name,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                response_format={"type": "json_object"},  # 🔥 THIS IS THE FIX
+                response_format={"type": "json_object"},
                 messages=[{"role": "user", "content": prompt}],
             )
 
             content = r.choices[0].message.content
-
             if isinstance(content, dict):
                 return json.dumps(content)
-
             return content or ""
 
         except Exception as e:
@@ -571,6 +574,7 @@ def call_openai(
             time.sleep(1)
 
     raise RuntimeError(f"OpenAI failed for {model_name}: {last_err}")
+
 
 def call_gemini(
     client,
@@ -594,11 +598,9 @@ def call_gemini(
                 },
             )
 
-            # 1) clean text shortcut
             if hasattr(r, "text") and r.text:
                 return r.text
 
-            # 2) walk candidates/parts safely
             if hasattr(r, "candidates") and r.candidates:
                 texts = []
                 for cand in r.candidates:
@@ -612,7 +614,6 @@ def call_gemini(
                 if texts:
                     return "\n".join(texts).strip()
 
-            # 3) last resort: stringify whole response for debug
             raise ValueError(f"No valid text in Gemini response: {r}")
 
         except Exception as e:
@@ -620,6 +621,7 @@ def call_gemini(
             time.sleep(1)
 
     raise RuntimeError(f"Gemini failed for {model_name}: {last_err}")
+
 
 def call_model(
     model_name: str,
@@ -701,7 +703,6 @@ def call_and_parse_sentiment(
         )
 
         last_raw = raw if isinstance(raw, str) else ""
-
         cleaned = last_raw.strip()
 
         cleaned = re.sub(
@@ -720,36 +721,6 @@ def call_and_parse_sentiment(
 
         if status in {"valid", "neutralized_abstention"}:
             return sentiment, confidence, reason, last_raw, status
-
-    return None, None, None, last_raw, "parse_failure"
-    last_raw = ""
-
-    for attempt in range(semantic_retry_limit):
-        effective_prompt = prompt
-        if attempt > 0:
-            effective_prompt = (
-                prompt
-                + "\n\nIMPORTANT: Return ONLY a valid JSON object with keys "
-                + '"sentiment", "confidence", and "explanation". '
-                + "No markdown. No text before or after."
-            )
-
-        raw = call_model(
-            model_name=model_name,
-            prompt=effective_prompt,
-            anthropic_client=anthropic_client,
-            openai_client=openai_client,
-            gemini_client=gemini_client,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            retry_limit=retry_limit,
-        )
-
-        last_raw = raw
-        sentiment, confidence, reason, status = parse_sentiment_response(raw)
-
-        if status in {"valid", "neutralized_abstention"}:
-            return sentiment, confidence, reason, raw, status
 
     return None, None, None, last_raw, "parse_failure"
 
@@ -796,6 +767,7 @@ def call_and_parse_relevance(
 
     return None, None, None, last_raw
 
+
 def call_and_parse_firm_link(
     prompt: str,
     anthropic_client,
@@ -839,6 +811,7 @@ def call_and_parse_firm_link(
 
     return None, None, None, last_raw
 
+
 # ==========================================================
 # prompt payload
 # ==========================================================
@@ -865,6 +838,17 @@ def build_format_payload(
         "MODEL_B_SENTIMENT": "" if model_b_sentiment is None else model_b_sentiment,
         "MODEL_B_CONFIDENCE": "" if model_b_confidence is None else model_b_confidence,
     })
+
+
+def render_prompt_template(template: str, payload: SafeDict) -> str:
+    """
+    Safe-ish formatter for templates that may contain literal JSON braces.
+    It preserves payload placeholders while escaping everything else.
+    """
+    t = template.replace("{", "{{").replace("}", "}}")
+    for k in payload:
+        t = t.replace("{{" + k + "}}", "{" + k + "}")
+    return t.format_map(payload)
 
 
 # ==========================================================
@@ -913,11 +897,11 @@ def apply_filters(df: pd.DataFrame, args) -> pd.DataFrame:
         out = out[out["source_bucket"] == args.source_bucket].copy()
 
     if args.sample_per_firm is not None:
-        out = (
-            out.groupby("canonical_name", group_keys=False)
-            .apply(lambda x: x.sample(n=min(len(x), args.sample_per_firm), random_state=42))
-            .reset_index(drop=True)
-        )
+        chunks = []
+        for _, g in out.groupby("canonical_name", sort=False):
+            n = min(len(g), args.sample_per_firm)
+            chunks.append(g.sample(n=n, random_state=42))
+        out = pd.concat(chunks, ignore_index=True) if chunks else out.iloc[0:0].copy()
 
     return out
 
@@ -991,12 +975,12 @@ def main():
     ensure_dir(paths["scored_events_dir"])
 
     anthropic_client, openai_client, gemini_client = build_clients(env)
-    
+
     primary_prompt = read_text(Path("prompts/context_prompt.txt"))
     tie_prompt = read_text(Path("prompts/context_tiebreaker_prompt.txt"))
-    
-    relevance_prompt = None
-    firm_link_prompt = None
+
+    relevance_prompt = read_text_if_exists(Path("prompts/relevance_filter_prompt.txt"))
+    firm_link_prompt = read_text_if_exists(Path("prompts/firm_link_filter_prompt.txt"))
 
     event_file = resolve_input_file(args.event_file, paths["event_firm_dir"], "event_firm_pairs")
     thread_file = resolve_input_file(args.thread_file, paths["thread_firm_dir"], "thread_firm_pairs")
@@ -1057,7 +1041,7 @@ def main():
 
     checkpoint_every = 10
     full_autosave_every = 200
-    
+
     primary_a_model = settings["models"]["score"]["primary_a"]
     primary_b_model = settings["models"]["score"]["primary_b"]
     tiebreaker_model = settings["models"]["score"]["tiebreaker"]
@@ -1102,14 +1086,14 @@ def main():
                     rows_since_checkpoint = 0
 
                 if rows_since_full_autosave >= full_autosave_every:
-                    outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix=args.output_prefix)
+                    outfile = save_df_clean(df, paths["scored_events_dir"], prefix=args.output_prefix)
                     print(f"FULL AUTOSAVED: {outfile}")
                     rows_since_full_autosave = 0
 
                 continue
 
         if relevance_prompt and not args.disable_llm_prefilter:
-            relevance_text = relevance_prompt.format_map(payload)
+            relevance_text = render_prompt_template(relevance_prompt, payload)
             r_decision, r_conf, r_reason, r_raw = call_and_parse_relevance(
                 relevance_model,
                 relevance_text,
@@ -1165,14 +1149,14 @@ def main():
                         rows_since_checkpoint = 0
 
                     if rows_since_full_autosave >= full_autosave_every:
-                        outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix=args.output_prefix)
+                        outfile = save_df_clean(df, paths["scored_events_dir"], prefix=args.output_prefix)
                         print(f"FULL AUTOSAVED: {outfile}")
                         rows_since_full_autosave = 0
 
                     continue
-                    
+
         if firm_link_prompt:
-            link_text = firm_link_prompt.format_map(payload)
+            link_text = render_prompt_template(firm_link_prompt, payload)
             fl_label, fl_conf, fl_reason, fl_raw = call_and_parse_firm_link(
                 link_text,
                 anthropic_client,
@@ -1211,7 +1195,7 @@ def main():
                     rows_since_checkpoint = 0
 
                 if rows_since_full_autosave >= full_autosave_every:
-                    outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix=args.output_prefix)
+                    outfile = save_df_clean(df, paths["scored_events_dir"], prefix=args.output_prefix)
                     print(f"FULL AUTOSAVED: {outfile}")
                     rows_since_full_autosave = 0
 
@@ -1239,14 +1223,14 @@ def main():
                     rows_since_checkpoint = 0
 
                 if rows_since_full_autosave >= full_autosave_every:
-                    outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix=args.output_prefix)
+                    outfile = save_df_clean(df, paths["scored_events_dir"], prefix=args.output_prefix)
                     print(f"FULL AUTOSAVED: {outfile}")
                     rows_since_full_autosave = 0
 
                 continue
 
-        prompt = primary_prompt.format_map(payload)
-        
+        prompt = render_prompt_template(primary_prompt, payload)
+
         a_s, a_c, a_reason, a_raw, a_status = call_and_parse_sentiment(
             primary_a_model,
             prompt,
@@ -1284,13 +1268,14 @@ def main():
             print("\n--- PRIMARY_B ABSTENTION NORMALIZED TO NEUTRAL ---")
             print(b_raw)
             print("--- END PRIMARY_B ---\n")
-        
-        sig = df.at[idx, "signal_strength"] or 0
-        scale = 0.5 + 0.5 * (sig / 4)  # 0.5 → 1.0
-        
+
+        sig = df.at[idx, "signal_strength"]
+        sig = 0 if pd.isna(sig) else float(sig)
+        scale = 0.5 + 0.5 * (sig / 4.0)
+
         adj_a_c = a_c * scale if a_c is not None else None
         adj_b_c = b_c * scale if b_c is not None else None
-        
+
         a_sc = scum_score(a_s, adj_a_c)
         b_sc = scum_score(b_s, adj_b_c)
 
@@ -1309,10 +1294,10 @@ def main():
         if args.debug_save_raw:
             df.at[idx, "primary_a_raw"] = a_raw
             df.at[idx, "primary_b_raw"] = b_raw
-        
+
         a_valid = is_valid_score(a_s, adj_a_c)
         b_valid = is_valid_score(b_s, adj_b_c)
-        
+
         if not a_valid and not b_valid:
             df.at[idx, "solomon_triggered"] = False
             df.at[idx, "final_sentiment"] = None
@@ -1323,100 +1308,100 @@ def main():
                 f"A_reason={safe_text(a_reason)} | B_reason={safe_text(b_reason)}"
             )
             df.at[idx, "final_reason_source"] = "primary_failure"
-        
+
             print(
                 f"[{counter}/{total_pending}] {event_key} | {row['canonical_name']} | "
                 f"source={row['source_bucket']} | PRIMARY FAILURE | "
                 f"A_status={a_status} | B_status={b_status}"
             )
-        
+
             rows_since_checkpoint += 1
             rows_since_full_autosave += 1
-        
+
             if rows_since_checkpoint >= checkpoint_every:
                 outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix=args.output_prefix)
                 print(f"CHECKPOINT SAVED: {outfile}")
                 rows_since_checkpoint = 0
-        
+
             if rows_since_full_autosave >= full_autosave_every:
-                outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix=args.output_prefix)
+                outfile = save_df_clean(df, paths["scored_events_dir"], prefix=args.output_prefix)
                 print(f"FULL AUTOSAVED: {outfile}")
                 rows_since_full_autosave = 0
-        
+
             continue
-        
+
         if a_valid and not b_valid:
             final_s = round(a_s, 4)
-            final_c = round(adj_a_c, 4) if adj_a_c is not None else round(a_c, 4)
+            final_c = round(adj_a_c, 4)
             final_sc = a_sc
             final_reason = f"A_only:{safe_text(a_reason)} | B_failed:{b_status}"
             final_reason_source = "primary_a_only"
-        
+
             df.at[idx, "solomon_triggered"] = False
             df.at[idx, "final_sentiment"] = final_s
             df.at[idx, "final_confidence"] = final_c
             df.at[idx, "final_scum"] = final_sc
             df.at[idx, "final_reason"] = final_reason
             df.at[idx, "final_reason_source"] = final_reason_source
-        
+
             print(
                 f"[{counter}/{total_pending}] "
                 f"{event_key} | {row['canonical_name']} | source={row['source_bucket']} | "
                 f"A={a_sc} | B={b_sc} | solomon=False | final={final_sc} | "
                 f"final_source={final_reason_source}"
             )
-        
+
             rows_since_checkpoint += 1
             rows_since_full_autosave += 1
-        
+
             if rows_since_checkpoint >= checkpoint_every:
                 outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix=args.output_prefix)
                 print(f"CHECKPOINT SAVED: {outfile}")
                 rows_since_checkpoint = 0
-        
+
             if rows_since_full_autosave >= full_autosave_every:
-                outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix=args.output_prefix)
+                outfile = save_df_clean(df, paths["scored_events_dir"], prefix=args.output_prefix)
                 print(f"FULL AUTOSAVED: {outfile}")
                 rows_since_full_autosave = 0
-        
+
             continue
-        
+
         if b_valid and not a_valid:
             final_s = round(b_s, 4)
-            final_c = round(adj_b_c, 4) if adj_b_c is not None else round(b_c, 4)
+            final_c = round(adj_b_c, 4)
             final_sc = b_sc
             final_reason = f"B_only:{safe_text(b_reason)} | A_failed:{a_status}"
             final_reason_source = "primary_b_only"
-        
+
             df.at[idx, "solomon_triggered"] = False
             df.at[idx, "final_sentiment"] = final_s
             df.at[idx, "final_confidence"] = final_c
             df.at[idx, "final_scum"] = final_sc
             df.at[idx, "final_reason"] = final_reason
             df.at[idx, "final_reason_source"] = final_reason_source
-        
+
             print(
                 f"[{counter}/{total_pending}] "
                 f"{event_key} | {row['canonical_name']} | source={row['source_bucket']} | "
                 f"A={a_sc} | B={b_sc} | solomon=False | final={final_sc} | "
                 f"final_source={final_reason_source}"
             )
-        
+
             rows_since_checkpoint += 1
             rows_since_full_autosave += 1
-        
+
             if rows_since_checkpoint >= checkpoint_every:
                 outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix=args.output_prefix)
                 print(f"CHECKPOINT SAVED: {outfile}")
                 rows_since_checkpoint = 0
-        
+
             if rows_since_full_autosave >= full_autosave_every:
-                outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix=args.output_prefix)
+                outfile = save_df_clean(df, paths["scored_events_dir"], prefix=args.output_prefix)
                 print(f"FULL AUTOSAVED: {outfile}")
                 rows_since_full_autosave = 0
-        
+
             continue
-            
+
         solomon = should_trigger_solomon(a_s, adj_a_c, a_sc, b_s, adj_b_c, b_sc, disagree_threshold)
         df.at[idx, "solomon_triggered"] = solomon
 
@@ -1424,14 +1409,11 @@ def main():
             tie_payload = build_format_payload(
                 row,
                 model_a_sentiment=a_s,
-                model_a_confidence=a_c,
+                model_a_confidence=adj_a_c,
                 model_b_sentiment=b_s,
-                model_b_confidence=b_c,
+                model_b_confidence=adj_b_c,
             )
-            t_prompt = tie_prompt.replace("{", "{{").replace("}", "}}")
-            for k in tie_payload:
-                t_prompt = t_prompt.replace("{{" + k + "}}", "{" + k + "}")
-            t_prompt = t_prompt.format_map(tie_payload)
+            t_prompt = render_prompt_template(tie_prompt, tie_payload)
 
             t_s, t_c, t_reason, t_raw, t_status = call_and_parse_sentiment(
                 tiebreaker_model,
@@ -1459,20 +1441,20 @@ def main():
                 df.at[idx, "tiebreaker_raw"] = t_raw
 
             if is_valid_score(t_s, t_c):
-                final_s = t_s
-                final_c = t_c
+                final_s = round(t_s, 4)
+                final_c = round(t_c, 4)
                 final_sc = t_sc
                 final_reason = t_reason
                 final_reason_source = "tiebreaker"
             else:
                 final_s = round((a_s + b_s) / 2, 4)
-                final_c = round((a_c + b_c) / 2, 4)
+                final_c = round((adj_a_c + adj_b_c) / 2, 4)
                 final_sc = scum_score(final_s, final_c)
                 final_reason = f"A:{safe_text(a_reason)} | B:{safe_text(b_reason)}"
                 final_reason_source = "primary_avg_tiebreaker_failed"
         else:
             final_s = round((a_s + b_s) / 2, 4)
-            final_c = round((a_c + b_c) / 2, 4)
+            final_c = round((adj_a_c + adj_b_c) / 2, 4)
             final_sc = scum_score(final_s, final_c)
             final_reason = f"A:{safe_text(a_reason)} | B:{safe_text(b_reason)}"
             final_reason_source = "primary_avg"
@@ -1501,7 +1483,7 @@ def main():
             rows_since_checkpoint = 0
 
         if rows_since_full_autosave >= full_autosave_every:
-            outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix=args.output_prefix)
+            outfile = save_df_clean(df, paths["scored_events_dir"], prefix=args.output_prefix)
             print(f"FULL AUTOSAVED: {outfile}")
             rows_since_full_autosave = 0
 
