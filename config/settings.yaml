@@ -36,7 +36,7 @@ models:
     #tiebreaker: gpt-4o
     #using below for context test
     primary_a: gemini-2.5-flash
-    primary_b: gpt-4o-mini
+    primary_b: claude-3-haiku-20240307
     tiebreaker: gpt-4o
 
 aggregation:
