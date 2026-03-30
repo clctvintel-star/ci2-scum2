@@ -41,11 +41,11 @@ NO if:
 CRITICAL:
 If NO → you MUST return:
 
-{
+{{
   "sentiment": null,
   "confidence": 0.0,
   "explanation": "not a firm-specific sentiment event"
-}
+}}
 
 STOP. Do not score.
 
@@ -97,9 +97,9 @@ If there is ANY real evaluative signal:
 CONFIDENCE
 --------------------------------------------------
 
-High: explicit firm evaluation  
-Medium: clear but indirect  
-Low: weak but real  
+High: explicit firm evaluation
+Medium: clear but indirect
+Low: weak but real
 
 0.0 ONLY if invalid (gate failed)
 
@@ -107,11 +107,11 @@ Low: weak but real
 PRIOR MODEL OUTPUTS
 --------------------------------------------------
 
-Model A sentiment: {MODEL_A_SENTIMENT}  
-Model A confidence: {MODEL_A_CONFIDENCE}  
+Model A sentiment: {MODEL_A_SENTIMENT}
+Model A confidence: {MODEL_A_CONFIDENCE}
 
-Model B sentiment: {MODEL_B_SENTIMENT}  
-Model B confidence: {MODEL_B_CONFIDENCE}  
+Model B sentiment: {MODEL_B_SENTIMENT}
+Model B confidence: {MODEL_B_CONFIDENCE}
 
 --------------------------------------------------
 OUTPUT FORMAT (STRICT)
@@ -129,9 +129,9 @@ Return valid JSON only.
 INPUT
 --------------------------------------------------
 
-Firm: {FUND_NAME}  
-Matched aliases: {MATCHED_ALIASES}  
-Candidate source: {CANDIDATE_SOURCE}  
+Firm: {FUND_NAME}
+Matched aliases: {MATCHED_ALIASES}
+Candidate source: {CANDIDATE_SOURCE}
 
 Thread title:
 {THREAD_TITLE}
