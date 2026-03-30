@@ -992,7 +992,7 @@ def main():
     checkpoint_every = 10
     full_autosave_every = 200
     
-    primary_a_model = "gpt-4o-mini"
+    primary_a_model = settings["models"]["score"]["primary_a"]
     primary_b_model = settings["models"]["score"]["primary_b"]
     tiebreaker_model = settings["models"]["score"]["tiebreaker"]
     relevance_model = settings["models"]["score"].get("relevance_filter", primary_b_model)
