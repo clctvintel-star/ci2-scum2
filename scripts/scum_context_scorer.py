@@ -923,8 +923,8 @@ def main():
     ensure_dir(paths["scored_events_dir"])
 
     anthropic_client, openai_client, gemini_client = build_clients(env)
-
-    primary_prompt = read_text(Path("prompts/scum_primary_prompt.txt"))
+    
+    primary_prompt = read_text(Path("prompts/context_prompt.txt"))
     tie_prompt = read_text(Path("prompts/scum_tiebreaker_prompt.txt"))
     
     relevance_prompt = None
