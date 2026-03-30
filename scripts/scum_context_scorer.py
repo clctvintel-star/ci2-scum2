@@ -1,201 +1,138 @@
-def call_gemini(
-    client,
-    model_name: str,
-    prompt: str,
-    max_tokens: int = 250,
-    temperature: float = 0.1,
-    retry_limit: int = 3,
-) -> str:
-    last_err = None
+import pandas as pd
+import numpy as np
+from pathlib import Path
 
-    for _ in range(retry_limit):
-        try:
-            r = client.models.generate_content(
-                model=model_name,
-                contents=prompt,
-                config={
-                    "temperature": 0.0,
-                    "top_p": 0.1,
-                    "max_output_tokens": 800,
-                    "response_mime_type": "application/json",
-                },
-            )
+# ============================================
+# CONFIG
+# ============================================
 
-            # 1) clean text shortcut
-            if hasattr(r, "text") and r.text:
-                return r.text
+SCORED_DIRECT = "/content/drive/MyDrive/CI2/db/scum2/scored_events/scored_events_direct_resume_v1_latest.parquet"
+SCORED_CONTEXT = "/content/drive/MyDrive/CI2/db/scum2/scored_events/scored_events_context_TEST.parquet"
 
-            # 2) walk candidates/parts safely
-            if hasattr(r, "candidates") and r.candidates:
-                texts = []
-                for cand in r.candidates:
-                    content = getattr(cand, "content", None)
-                    parts = getattr(content, "parts", None) if content is not None else None
-                    if parts:
-                        for part in parts:
-                            txt = getattr(part, "text", None)
-                            if txt:
-                                texts.append(txt)
-                if texts:
-                    return "\n".join(texts).strip()
+OUTPUT_DIR = "/content/drive/MyDrive/CI2/db/scum2/context_experiment/"
 
-            # 3) last resort: stringify whole response for debug
-            raise ValueError(f"No valid text in Gemini response: {r}")
+FIRMS = ["Two Sigma", "Jane Street"]
+SAMPLE_PER_FIRM = 2500
 
-        except Exception as e:
-            last_err = e
-            time.sleep(1)
+POS_THRESHOLD = 0.10
+NEG_THRESHOLD = -0.10
 
-    print(f"⚠️ Gemini empty response (likely MAX_TOKENS): {last_err}")
-    return f"__GEMINI_EMPTY__::{last_err}"
+Path(OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
 
-def call_model(
-    model_name: str,
-    prompt: str,
-    anthropic_client,
-    openai_client,
-    gemini_client,
-    max_tokens: int = 250,
-    temperature: float = 0.1,
-    retry_limit: int = 3,
-) -> str:
-    if model_name.startswith("claude"):
-        return call_anthropic(
-            anthropic_client,
-            model_name,
-            prompt,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            retry_limit=retry_limit,
+# ============================================
+# LOAD
+# ============================================
+
+direct_df = pd.read_parquet(SCORED_DIRECT)
+context_df = pd.read_parquet(SCORED_CONTEXT)
+
+print("Direct rows:", len(direct_df))
+print("Context rows:", len(context_df))
+
+# keep only valid scored rows
+direct_df = direct_df[direct_df["final_scum"].notna()].copy()
+context_df = context_df[context_df["final_scum"].notna()].copy()
+
+# ============================================
+# SAMPLE CONTEXT
+# ============================================
+
+context_sample = (
+    context_df[context_df["canonical_name"].isin(FIRMS)]
+    .groupby("canonical_name", group_keys=False)
+    .apply(lambda x: x.sample(n=min(len(x), SAMPLE_PER_FIRM), random_state=42))
+    .reset_index(drop=True)
+)
+
+print("Sampled context rows:", len(context_sample))
+
+# ============================================
+# BUILD TWO DATASETS
+# ============================================
+
+direct_only = direct_df.copy()
+
+direct_plus_context = pd.concat([
+    direct_df,
+    context_sample
+], ignore_index=True)
+
+# ============================================
+# AGG FUNCTION (REUSE YOUR LOGIC)
+# ============================================
+
+def build_fund_days(df, label):
+
+    df = df.copy()
+
+    df["date"] = pd.to_datetime(df["created_utc"], unit="s", errors="coerce").dt.date
+    df = df[df["date"].notna()].copy()
+
+    df["pos_signal"] = (df["final_scum"] >= POS_THRESHOLD).astype(int)
+    df["neg_signal"] = (df["final_scum"] <= NEG_THRESHOLD).astype(int)
+    df["net_signal"] = df["pos_signal"] - df["neg_signal"]
+
+    # POST LEVEL
+    post_days = (
+        df.groupby(["canonical_name", "post_id", "date"], as_index=False)
+        .agg(
+            post_scum=("final_scum", "mean"),
+            event_count=("event_id", "count"),
+            pos_event_count=("pos_signal", "sum"),
+            neg_event_count=("neg_signal", "sum"),
+            net_signal_sum=("net_signal", "sum"),
         )
+    )
 
-    if model_name.startswith("gpt"):
-        return call_openai(
-            openai_client,
-            model_name,
-            prompt,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            retry_limit=retry_limit,
+    post_days["dsr_pos"] = post_days["pos_event_count"] / post_days["event_count"]
+    post_days["dsr_neg"] = post_days["neg_event_count"] / post_days["event_count"]
+    post_days["dsr_net"] = post_days["dsr_pos"] - post_days["dsr_neg"]
+
+    # FUND LEVEL
+    fund_days = (
+        post_days.groupby(["canonical_name", "date"], as_index=False)
+        .agg(
+            mean_scum=("post_scum", "mean"),
+            post_count=("post_id", "count"),
+            event_count=("event_count", "sum"),
+            pos_event_count=("pos_event_count", "sum"),
+            neg_event_count=("neg_event_count", "sum"),
         )
+    )
 
-    if model_name.startswith("gemini"):
-        return call_gemini(
-            gemini_client,
-            model_name,
-            prompt,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            retry_limit=retry_limit,
-        )
+    fund_days["dsr_pos"] = fund_days["pos_event_count"] / fund_days["event_count"]
+    fund_days["dsr_neg"] = fund_days["neg_event_count"] / fund_days["event_count"]
+    fund_days["dsr_net"] = fund_days["dsr_pos"] - fund_days["dsr_neg"]
 
-    raise ValueError(f"Unsupported model family: {model_name}")
+    # rolling
+    fund_days = fund_days.sort_values(["canonical_name", "date"])
 
+    fund_days["ma28"] = (
+        fund_days.groupby("canonical_name")["mean_scum"]
+        .transform(lambda x: x.rolling(28, min_periods=7).mean())
+    )
 
-def parse_sentiment_response(text: Any) -> Tuple[Optional[float], Optional[float], Optional[str], str]:
-    if isinstance(text, dict):
-        payload = {str(k).lower(): v for k, v in text.items()}
-    else:
-        payload = extract_json_payload(text) or {}
+    out_path = f"{OUTPUT_DIR}/fund_days_{label}.parquet"
+    fund_days.to_parquet(out_path, index=False)
 
-    if not payload:
-        return None, None, None, "parse_failure"
+    print(f"\nSaved: {out_path}")
+    return fund_days
 
-    sentiment = payload.get("sentiment")
-    confidence = payload.get("confidence")
-    explanation = payload.get("explanation") or payload.get("reason") or payload.get("rationale")
+# ============================================
+# RUN BOTH
+# ============================================
 
-    sentiment = clamp_float(sentiment, -1.0, 1.0)
-    confidence = clamp_float(confidence, 0.0, 1.0)
-    explanation = safe_text(explanation) or None
+fd_direct = build_fund_days(direct_only, "direct_only")
+fd_plus = build_fund_days(direct_plus_context, "direct_plus_context")
 
-    if sentiment is None and confidence == 0.0:
-        sentiment = 0.0
-        confidence = 0.10
-        return sentiment, confidence, explanation, "neutralized_abstention"
+# ============================================
+# QUICK DIFF CHECK
+# ============================================
 
-    if sentiment is None or confidence is None:
-        return None, None, explanation, "parse_failure"
+for f in FIRMS:
+    d1 = fd_direct[fd_direct["canonical_name"] == f]["mean_scum"].mean()
+    d2 = fd_plus[fd_plus["canonical_name"] == f]["mean_scum"].mean()
 
-    return sentiment, confidence, explanation, "valid"
-
-
-def call_and_parse_sentiment(
-    model_name: str,
-    prompt: str,
-    anthropic_client,
-    openai_client,
-    gemini_client,
-    max_tokens: int = 250,
-    temperature: float = 0.1,
-    retry_limit: int = 3,
-    semantic_retry_limit: int = 3,
-) -> Tuple[Optional[float], Optional[float], Optional[str], str, str]:
-    last_raw = ""
-
-    for attempt in range(semantic_retry_limit):
-        base_prompt = prompt if len(prompt) < 4000 else prompt[:4000]
-
-        effective_prompt = ""
-        if attempt == 0:
-            effective_prompt = (
-                "Return ONLY valid JSON. No prose. No explanation outside JSON.\n"
-                + '{"sentiment": number, "confidence": number, "explanation": "..."}\n\n'
-                + base_prompt
-            )
-        elif attempt == 1:
-            effective_prompt = (
-                "STRICT: Output MUST be valid JSON. No text before or after.\n"
-                + '{"sentiment": number, "confidence": number, "explanation": "..."}\n\n'
-                + base_prompt
-            )
-        else:
-            effective_prompt = (
-                "FINAL ATTEMPT. If you do not return valid JSON, this response will be discarded.\n"
-                + '{"sentiment": number, "confidence": number, "explanation": "..."}\n\n'
-                + prompt[:2500]  # Trim more aggressively for the final attempt
-            )
-
-        raw = call_model(
-            model_name=model_name,
-            prompt=effective_prompt,
-            anthropic_client=anthropic_client,
-            openai_client=openai_client,
-            gemini_client=gemini_client,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            retry_limit=retry_limit,
-        )
-
-        last_raw = raw if isinstance(raw, str) else ""
-
-        cleaned = last_raw.strip()
-
-        # Handle the Gemini empty sentinel failure
-        if cleaned.startswith("__GEMINI_EMPTY__"):
-            return None, None, None, last_raw, "model_failure"
-
-        cleaned = re.sub(
-            r"^.*?json.*?:",  # Hardened regex for preamble
-            "",
-            cleaned,
-            flags=re.IGNORECASE,
-        )
-        cleaned = re.sub(r"```json", "", cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r"```", "", cleaned)
-        cleaned = cleaned.strip()
-
-        if not cleaned:
-            continue
-
-        payload = extract_json_payload(cleaned)
-        if not payload:
-            continue
-
-        # Pass the extracted payload directly to parse_sentiment_response
-        sentiment, confidence, reason, status = parse_sentiment_response(payload)
-
-        if status in {"valid", "neutralized_abstention"}:
-            return sentiment, confidence, reason, last_raw, status
-
-    return None, None, None, last_raw, "parse_failure"
+    print(f"\n{f}")
+    print("Direct mean:", round(d1, 4))
+    print("With context:", round(d2, 4))
