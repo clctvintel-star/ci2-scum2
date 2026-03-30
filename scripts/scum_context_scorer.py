@@ -1,6 +1,5 @@
 import argparse
 import json
-import math
 import re
 import time
 from datetime import datetime, timezone
@@ -73,6 +72,15 @@ CHECKPOINT_COLUMNS = [
     "canonical_name",
     "_row_key",
 ] + STATEFUL_COLUMNS
+
+EMPTY_JSONISH_OUTPUTS = {
+    "",
+    "```",
+    "```json",
+    "Here is the JSON requested:",
+    "Here is the JSON requested:\n```",
+    "Here is the JSON requested:\n```json",
+}
 
 
 # ==========================================================
@@ -258,7 +266,7 @@ def resolve_input_file(explicit_path: Optional[str], directory: str, prefix: str
 
 
 def read_text(path: Path) -> str:
-    return Path(path).read_text(encoding="utf-8")
+    return path.read_text(encoding="utf-8")
 
 
 def read_text_if_exists(path: Path) -> Optional[str]:
@@ -267,7 +275,9 @@ def read_text_if_exists(path: Path) -> Optional[str]:
 
 def atomic_write_parquet(df: pd.DataFrame, outfile: Path) -> Path:
     ensure_dir(outfile.parent)
-    df.to_parquet(outfile, index=False)
+    tmp = outfile.with_suffix(outfile.suffix + ".tmp")
+    df.to_parquet(tmp, index=False)
+    tmp.replace(outfile)
     return outfile
 
 
@@ -321,6 +331,13 @@ def strip_code_fences(text: str) -> str:
     return text.strip()
 
 
+def normalize_model_text(text: Any) -> str:
+    cleaned = safe_text(text)
+    cleaned = re.sub(r"^here is the json requested:\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = strip_code_fences(cleaned)
+    return cleaned.strip()
+
+
 def coerce_incomplete_json(text: str) -> Optional[Dict[str, Any]]:
     if not isinstance(text, str):
         return None
@@ -347,7 +364,7 @@ def extract_json_payload(text: Any) -> Optional[Dict[str, Any]]:
     if not isinstance(text, str):
         return None
 
-    text = strip_code_fences(text)
+    text = normalize_model_text(text)
     if not text:
         return None
 
@@ -538,7 +555,12 @@ def call_anthropic(
                 temperature=temperature,
                 messages=[{"role": "user", "content": prompt}],
             )
-            return r.content[0].text
+            parts = []
+            for block in r.content:
+                txt = getattr(block, "text", None)
+                if txt:
+                    parts.append(txt)
+            return "\n".join(parts).strip()
         except Exception as e:
             last_err = e
             time.sleep(1)
@@ -561,13 +583,22 @@ def call_openai(
                 temperature=temperature,
                 max_tokens=max_tokens,
                 response_format={"type": "json_object"},
-                messages=[{"role": "user", "content": prompt}],
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Return only a valid JSON object. "
+                            "Do not include markdown, code fences, or any text before or after the JSON."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
             )
 
             content = r.choices[0].message.content
             if isinstance(content, dict):
                 return json.dumps(content)
-            return content or ""
+            return safe_text(content)
 
         except Exception as e:
             last_err = e
@@ -575,21 +606,49 @@ def call_openai(
 
     raise RuntimeError(f"OpenAI failed for {model_name}: {last_err}")
 
+
+def extract_text_from_gemini_response(r: Any) -> str:
+    if getattr(r, "text", None):
+        return safe_text(r.text)
+
+    texts = []
+    candidates = getattr(r, "candidates", None) or []
+    for cand in candidates:
+        content = getattr(cand, "content", None)
+        parts = getattr(content, "parts", None) if content is not None else None
+        if parts:
+            for part in parts:
+                txt = getattr(part, "text", None)
+                if txt:
+                    texts.append(txt)
+
+    return "\n".join(texts).strip()
+
+
 def call_gemini(
     client,
     model_name: str,
     prompt: str,
-    max_tokens: int = 250,
-    temperature: float = 0.1,
+    max_tokens: int = 400,
+    temperature: float = 0.2,
     retry_limit: int = 3,
 ) -> str:
     last_err = None
+
+    gemini_prompt = (
+        prompt
+        + "\n\nReturn only a valid JSON object. "
+        + 'Use keys "sentiment", "confidence", and "explanation". '
+        + "Do not include markdown. Do not include code fences. "
+        + 'Do not say "Here is the JSON requested". '
+        + 'If the signal is weak, return {"sentiment": 0.0, "confidence": 0.1, "explanation": "insufficient signal"}.'
+    )
 
     for _ in range(retry_limit):
         try:
             r = client.models.generate_content(
                 model=model_name,
-                contents=prompt,
+                contents=gemini_prompt,
                 config={
                     "temperature": temperature,
                     "max_output_tokens": max_tokens,
@@ -597,38 +656,22 @@ def call_gemini(
                 },
             )
 
-            # 1) direct text (best case)
-            if getattr(r, "text", None):
-                return r.text
+            text = extract_text_from_gemini_response(r)
+            if text:
+                return text
 
-            # 2) candidate parts (normal case)
-            if getattr(r, "candidates", None):
-                texts = []
-                for cand in r.candidates:
-                    content = getattr(cand, "content", None)
-                    parts = getattr(content, "parts", None) if content else None
+            finish = None
+            candidates = getattr(r, "candidates", None) or []
+            if candidates:
+                finish = getattr(candidates[0], "finish_reason", None)
 
-                    if parts:
-                        for part in parts:
-                            txt = getattr(part, "text", None)
-                            if txt:
-                                texts.append(txt)
-
-                if texts:
-                    return "\n".join(texts).strip()
-
-            # 🔥 3) salvage MAX_TOKENS cases
-            if getattr(r, "candidates", None):
-                cand = r.candidates[0]
-                finish = getattr(cand, "finish_reason", None)
-
-                if str(finish) == "MAX_TOKENS":
-                    # return whatever exists, even if partial
-                    raw = str(r)
-                    if "{" in raw:
-                        return raw
-
-            last_err = f"No usable text. Finish reason: {finish}"
+            if finish is not None and "MAX_TOKENS" in str(finish):
+                raw = safe_text(r)
+                if "sentiment" in raw or "confidence" in raw or "{" in raw:
+                    return raw
+                last_err = f"MAX_TOKENS with no recoverable JSON text: {finish}"
+            else:
+                last_err = f"No usable text. Finish reason: {finish}"
 
         except Exception as e:
             last_err = e
@@ -686,8 +729,8 @@ def call_and_parse_sentiment(
     anthropic_client,
     openai_client,
     gemini_client,
-    max_tokens: int = 250,
-    temperature: float = 0.1,
+    max_tokens: int = 400,
+    temperature: float = 0.2,
     retry_limit: int = 3,
     semantic_retry_limit: int = 3,
 ) -> Tuple[Optional[float], Optional[float], Optional[str], str, str]:
@@ -700,33 +743,32 @@ def call_and_parse_sentiment(
                 prompt
                 + "\n\nIMPORTANT: Return ONLY a valid JSON object with keys "
                 + '"sentiment", "confidence", and "explanation". '
-                + "Do NOT say 'Here is the JSON requested'. "
                 + "Do NOT use markdown fences. "
-                + "Do NOT output any text before or after the JSON."
+                + 'Do NOT say "Here is the JSON requested". '
+                + "Do NOT output any text before or after the JSON. "
+                + 'If uncertain, return {"sentiment": 0.0, "confidence": 0.1, "explanation": "insufficient signal"}.'
             )
 
-        raw = call_model(
-            model_name=model_name,
-            prompt=effective_prompt,
-            anthropic_client=anthropic_client,
-            openai_client=openai_client,
-            gemini_client=gemini_client,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            retry_limit=retry_limit,
-        )
+        try:
+            raw = call_model(
+                model_name=model_name,
+                prompt=effective_prompt,
+                anthropic_client=anthropic_client,
+                openai_client=openai_client,
+                gemini_client=gemini_client,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                retry_limit=retry_limit,
+            )
+        except Exception as e:
+            last_raw = safe_text(e)
+            continue
 
-        last_raw = raw if isinstance(raw, str) else ""
-        cleaned = last_raw.strip()
+        last_raw = raw if isinstance(raw, str) else safe_text(raw)
+        cleaned = normalize_model_text(last_raw)
 
-        cleaned = re.sub(
-            r"^here is the json requested:\s*",
-            "",
-            cleaned,
-            flags=re.IGNORECASE,
-        )
-
-        cleaned = strip_code_fences(cleaned).strip()
+        if cleaned in EMPTY_JSONISH_OUTPUTS:
+            continue
 
         if not cleaned or "{" not in cleaned:
             continue
@@ -735,6 +777,9 @@ def call_and_parse_sentiment(
 
         if status in {"valid", "neutralized_abstention"}:
             return sentiment, confidence, reason, last_raw, status
+
+    if normalize_model_text(last_raw) in EMPTY_JSONISH_OUTPUTS or "{" not in normalize_model_text(last_raw):
+        return 0.0, 0.1, "model returned empty or non-JSON output", last_raw, "neutralized_empty"
 
     return None, None, None, last_raw, "parse_failure"
 
@@ -763,16 +808,20 @@ def call_and_parse_relevance(
                 + "Reason: ...\n"
             )
 
-        raw = call_model(
-            model_name=model_name,
-            prompt=effective_prompt,
-            anthropic_client=anthropic_client,
-            openai_client=openai_client,
-            gemini_client=gemini_client,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            retry_limit=retry_limit,
-        )
+        try:
+            raw = call_model(
+                model_name=model_name,
+                prompt=effective_prompt,
+                anthropic_client=anthropic_client,
+                openai_client=openai_client,
+                gemini_client=gemini_client,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                retry_limit=retry_limit,
+            )
+        except Exception as e:
+            last_raw = safe_text(e)
+            continue
 
         last_raw = raw
         decision, confidence, reason = parse_relevance_response(raw)
@@ -806,16 +855,20 @@ def call_and_parse_firm_link(
                 + "Reason: ...\n"
             )
 
-        raw = call_model(
-            model_name=model_name,
-            prompt=effective_prompt,
-            anthropic_client=anthropic_client,
-            openai_client=openai_client,
-            gemini_client=gemini_client,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            retry_limit=retry_limit,
-        )
+        try:
+            raw = call_model(
+                model_name=model_name,
+                prompt=effective_prompt,
+                anthropic_client=anthropic_client,
+                openai_client=openai_client,
+                gemini_client=gemini_client,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                retry_limit=retry_limit,
+            )
+        except Exception as e:
+            last_raw = safe_text(e)
+            continue
 
         last_raw = raw
         label, confidence, reason = parse_firm_link_response(raw)
@@ -855,10 +908,6 @@ def build_format_payload(
 
 
 def render_prompt_template(template: str, payload: SafeDict) -> str:
-    """
-    Safe-ish formatter for templates that may contain literal JSON braces.
-    It preserves payload placeholders while escaping everything else.
-    """
     t = template.replace("{", "{{").replace("}", "}}")
     for k in payload:
         t = t.replace("{{" + k + "}}", "{" + k + "}")
@@ -891,6 +940,9 @@ def prepare_scoring_df(event_df: pd.DataFrame, thread_df: pd.DataFrame) -> pd.Da
         )
     else:
         df = event_df.copy()
+
+    if "candidate_source" not in df.columns:
+        df["candidate_source"] = None
 
     df["source_bucket"] = df["candidate_source"].apply(normalize_source_bucket)
 
@@ -974,6 +1026,24 @@ def heuristic_prefilter(row: pd.Series) -> Tuple[Optional[str], Optional[float],
 
 
 # ==========================================================
+# row save helper
+# ==========================================================
+
+def maybe_save(df: pd.DataFrame, paths: Dict[str, str], prefix: str, rows_since_checkpoint: int, rows_since_full_autosave: int, checkpoint_every: int, full_autosave_every: int) -> Tuple[int, int]:
+    if rows_since_checkpoint >= checkpoint_every:
+        outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix=prefix)
+        print(f"CHECKPOINT SAVED: {outfile}")
+        rows_since_checkpoint = 0
+
+    if rows_since_full_autosave >= full_autosave_every:
+        outfile = save_df_clean(df, paths["scored_events_dir"], prefix=prefix)
+        print(f"FULL AUTOSAVED: {outfile}")
+        rows_since_full_autosave = 0
+
+    return rows_since_checkpoint, rows_since_full_autosave
+
+
+# ==========================================================
 # main
 # ==========================================================
 
@@ -992,7 +1062,6 @@ def main():
 
     primary_prompt = read_text(Path("prompts/context_prompt.txt"))
     tie_prompt = read_text(Path("prompts/context_tiebreaker_prompt.txt"))
-
     relevance_prompt = read_text_if_exists(Path("prompts/relevance_filter_prompt.txt"))
     firm_link_prompt = read_text_if_exists(Path("prompts/firm_link_filter_prompt.txt"))
 
@@ -1052,7 +1121,6 @@ def main():
 
     retry_limit = settings.get("scoring", {}).get("retry_limit", 3)
     disagree_threshold = settings.get("scoring", {}).get("disagree_threshold", 0.2)
-
     checkpoint_every = 10
     full_autosave_every = 200
 
@@ -1093,17 +1161,11 @@ def main():
 
                 rows_since_checkpoint += 1
                 rows_since_full_autosave += 1
-
-                if rows_since_checkpoint >= checkpoint_every:
-                    outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix=args.output_prefix)
-                    print(f"CHECKPOINT SAVED: {outfile}")
-                    rows_since_checkpoint = 0
-
-                if rows_since_full_autosave >= full_autosave_every:
-                    outfile = save_df_clean(df, paths["scored_events_dir"], prefix=args.output_prefix)
-                    print(f"FULL AUTOSAVED: {outfile}")
-                    rows_since_full_autosave = 0
-
+                rows_since_checkpoint, rows_since_full_autosave = maybe_save(
+                    df, paths, args.output_prefix,
+                    rows_since_checkpoint, rows_since_full_autosave,
+                    checkpoint_every, full_autosave_every
+                )
                 continue
 
         if relevance_prompt and not args.disable_llm_prefilter:
@@ -1128,13 +1190,6 @@ def main():
 
                 if args.debug_save_raw:
                     df.at[idx, "prefilter_raw"] = r_raw
-
-                print(
-                    f"[{counter}/{total_pending}] {event_key} | {row['canonical_name']} | "
-                    f"source={row['source_bucket']} | PREFILTER_RESCUE_TITLE | "
-                    f"reason={short_reason(r_reason)}"
-                )
-
             else:
                 df.at[idx, "prefilter_decision"] = r_decision
                 df.at[idx, "prefilter_confidence"] = r_conf
@@ -1156,17 +1211,11 @@ def main():
 
                     rows_since_checkpoint += 1
                     rows_since_full_autosave += 1
-
-                    if rows_since_checkpoint >= checkpoint_every:
-                        outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix=args.output_prefix)
-                        print(f"CHECKPOINT SAVED: {outfile}")
-                        rows_since_checkpoint = 0
-
-                    if rows_since_full_autosave >= full_autosave_every:
-                        outfile = save_df_clean(df, paths["scored_events_dir"], prefix=args.output_prefix)
-                        print(f"FULL AUTOSAVED: {outfile}")
-                        rows_since_full_autosave = 0
-
+                    rows_since_checkpoint, rows_since_full_autosave = maybe_save(
+                        df, paths, args.output_prefix,
+                        rows_since_checkpoint, rows_since_full_autosave,
+                        checkpoint_every, full_autosave_every
+                    )
                     continue
 
         if firm_link_prompt:
@@ -1202,17 +1251,11 @@ def main():
 
                 rows_since_checkpoint += 1
                 rows_since_full_autosave += 1
-
-                if rows_since_checkpoint >= checkpoint_every:
-                    outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix=args.output_prefix)
-                    print(f"CHECKPOINT SAVED: {outfile}")
-                    rows_since_checkpoint = 0
-
-                if rows_since_full_autosave >= full_autosave_every:
-                    outfile = save_df_clean(df, paths["scored_events_dir"], prefix=args.output_prefix)
-                    print(f"FULL AUTOSAVED: {outfile}")
-                    rows_since_full_autosave = 0
-
+                rows_since_checkpoint, rows_since_full_autosave = maybe_save(
+                    df, paths, args.output_prefix,
+                    rows_since_checkpoint, rows_since_full_autosave,
+                    checkpoint_every, full_autosave_every
+                )
                 continue
 
             if fl_label == "category":
@@ -1230,17 +1273,11 @@ def main():
 
                 rows_since_checkpoint += 1
                 rows_since_full_autosave += 1
-
-                if rows_since_checkpoint >= checkpoint_every:
-                    outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix=args.output_prefix)
-                    print(f"CHECKPOINT SAVED: {outfile}")
-                    rows_since_checkpoint = 0
-
-                if rows_since_full_autosave >= full_autosave_every:
-                    outfile = save_df_clean(df, paths["scored_events_dir"], prefix=args.output_prefix)
-                    print(f"FULL AUTOSAVED: {outfile}")
-                    rows_since_full_autosave = 0
-
+                rows_since_checkpoint, rows_since_full_autosave = maybe_save(
+                    df, paths, args.output_prefix,
+                    rows_since_checkpoint, rows_since_full_autosave,
+                    checkpoint_every, full_autosave_every
+                )
                 continue
 
         prompt = render_prompt_template(primary_prompt, payload)
@@ -1251,6 +1288,8 @@ def main():
             anthropic_client,
             openai_client,
             gemini_client,
+            max_tokens=400,
+            temperature=0.2 if primary_a_model.startswith("gemini") else 0.1,
             retry_limit=retry_limit,
         )
 
@@ -1260,6 +1299,8 @@ def main():
             anthropic_client,
             openai_client,
             gemini_client,
+            max_tokens=400,
+            temperature=0.2 if primary_b_model.startswith("gemini") else 0.1,
             retry_limit=retry_limit,
         )
 
@@ -1272,16 +1313,6 @@ def main():
             print("\n--- PRIMARY_B RAW OUTPUT ---")
             print(b_raw)
             print("--- END PRIMARY_B RAW OUTPUT ---\n")
-
-        if a_status == "neutralized_abstention":
-            print("\n--- PRIMARY_A ABSTENTION NORMALIZED TO NEUTRAL ---")
-            print(a_raw)
-            print("--- END PRIMARY_A ---\n")
-
-        if b_status == "neutralized_abstention":
-            print("\n--- PRIMARY_B ABSTENTION NORMALIZED TO NEUTRAL ---")
-            print(b_raw)
-            print("--- END PRIMARY_B ---\n")
 
         sig = df.at[idx, "signal_strength"]
         sig = 0 if pd.isna(sig) else float(sig)
@@ -1331,17 +1362,11 @@ def main():
 
             rows_since_checkpoint += 1
             rows_since_full_autosave += 1
-
-            if rows_since_checkpoint >= checkpoint_every:
-                outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix=args.output_prefix)
-                print(f"CHECKPOINT SAVED: {outfile}")
-                rows_since_checkpoint = 0
-
-            if rows_since_full_autosave >= full_autosave_every:
-                outfile = save_df_clean(df, paths["scored_events_dir"], prefix=args.output_prefix)
-                print(f"FULL AUTOSAVED: {outfile}")
-                rows_since_full_autosave = 0
-
+            rows_since_checkpoint, rows_since_full_autosave = maybe_save(
+                df, paths, args.output_prefix,
+                rows_since_checkpoint, rows_since_full_autosave,
+                checkpoint_every, full_autosave_every
+            )
             continue
 
         if a_valid and not b_valid:
@@ -1367,17 +1392,11 @@ def main():
 
             rows_since_checkpoint += 1
             rows_since_full_autosave += 1
-
-            if rows_since_checkpoint >= checkpoint_every:
-                outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix=args.output_prefix)
-                print(f"CHECKPOINT SAVED: {outfile}")
-                rows_since_checkpoint = 0
-
-            if rows_since_full_autosave >= full_autosave_every:
-                outfile = save_df_clean(df, paths["scored_events_dir"], prefix=args.output_prefix)
-                print(f"FULL AUTOSAVED: {outfile}")
-                rows_since_full_autosave = 0
-
+            rows_since_checkpoint, rows_since_full_autosave = maybe_save(
+                df, paths, args.output_prefix,
+                rows_since_checkpoint, rows_since_full_autosave,
+                checkpoint_every, full_autosave_every
+            )
             continue
 
         if b_valid and not a_valid:
@@ -1403,17 +1422,11 @@ def main():
 
             rows_since_checkpoint += 1
             rows_since_full_autosave += 1
-
-            if rows_since_checkpoint >= checkpoint_every:
-                outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix=args.output_prefix)
-                print(f"CHECKPOINT SAVED: {outfile}")
-                rows_since_checkpoint = 0
-
-            if rows_since_full_autosave >= full_autosave_every:
-                outfile = save_df_clean(df, paths["scored_events_dir"], prefix=args.output_prefix)
-                print(f"FULL AUTOSAVED: {outfile}")
-                rows_since_full_autosave = 0
-
+            rows_since_checkpoint, rows_since_full_autosave = maybe_save(
+                df, paths, args.output_prefix,
+                rows_since_checkpoint, rows_since_full_autosave,
+                checkpoint_every, full_autosave_every
+            )
             continue
 
         solomon = should_trigger_solomon(a_s, adj_a_c, a_sc, b_s, adj_b_c, b_sc, disagree_threshold)
@@ -1435,6 +1448,8 @@ def main():
                 anthropic_client,
                 openai_client,
                 gemini_client,
+                max_tokens=400,
+                temperature=0.2 if tiebreaker_model.startswith("gemini") else 0.1,
                 retry_limit=retry_limit,
             )
 
@@ -1490,16 +1505,11 @@ def main():
 
         rows_since_checkpoint += 1
         rows_since_full_autosave += 1
-
-        if rows_since_checkpoint >= checkpoint_every:
-            outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix=args.output_prefix)
-            print(f"CHECKPOINT SAVED: {outfile}")
-            rows_since_checkpoint = 0
-
-        if rows_since_full_autosave >= full_autosave_every:
-            outfile = save_df_clean(df, paths["scored_events_dir"], prefix=args.output_prefix)
-            print(f"FULL AUTOSAVED: {outfile}")
-            rows_since_full_autosave = 0
+        rows_since_checkpoint, rows_since_full_autosave = maybe_save(
+            df, paths, args.output_prefix,
+            rows_since_checkpoint, rows_since_full_autosave,
+            checkpoint_every, full_autosave_every
+        )
 
     checkpoint_outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix=args.output_prefix)
     latest_outfile = save_df_clean(df, paths["scored_events_dir"], prefix=args.output_prefix)
@@ -1522,8 +1532,8 @@ def main():
         print(rescue_series.value_counts(dropna=False))
 
     print("\nPrimary validity:")
-    print("A valid:", int(pd.Series(df["primary_a_status"]).isin(["valid", "neutralized_abstention"]).sum()))
-    print("B valid:", int(pd.Series(df["primary_b_status"]).isin(["valid", "neutralized_abstention"]).sum()))
+    print("A valid:", int(pd.Series(df["primary_a_status"]).isin(["valid", "neutralized_abstention", "neutralized_empty"]).sum()))
+    print("B valid:", int(pd.Series(df["primary_b_status"]).isin(["valid", "neutralized_abstention", "neutralized_empty"]).sum()))
 
     print("\nPrimary statuses:")
     print("A:")
