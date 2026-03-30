@@ -15,117 +15,123 @@ Use THREAD TITLE, THREAD TEXT, and PARENT TEXT only to resolve:
 
 Do NOT score the entire thread.
 
-CONTEXT VALIDATION GATE (CRITICAL)
+--------------------------------------------------
+HARD VALIDATION GATE (NON-NEGOTIABLE)
+--------------------------------------------------
 
-Before resolving disagreement, determine whether the EVENT TEXT is a valid firm-specific sentiment event.
+Before doing anything else, decide:
 
-A valid event must satisfy at least one:
-1. The EVENT TEXT directly evaluates "{FUND_NAME}"
-2. The EVENT TEXT clearly refers to "{FUND_NAME}" via context (parent/thread) AND modifies or reacts to that evaluation
-3. The EVENT TEXT adds new firm-specific information or evaluation about "{FUND_NAME}" (not general advice or discussion)
+Is this a REAL firm-specific sentiment event?
 
-If NONE of the above are true:
+The answer must be YES or NO.
 
-Return:
-sentiment = null
-confidence = 0.0
+YES only if:
+- The EVENT TEXT directly evaluates "{FUND_NAME}", OR
+- The EVENT TEXT clearly refers to "{FUND_NAME}" AND actively reacts to or modifies a firm-specific evaluation in the PARENT TEXT, OR
+- The EVENT TEXT introduces new firm-specific information that affects reputation
 
-The validation gate OVERRIDES all later scoring rules.
-If the event is not valid, you MUST return null and STOP.
-Do NOT continue to scoring.
+NO if:
+- It is resume advice, career advice, or general discussion
+- It is academic/program discussion (degrees, schools, courses)
+- It is generic hedge fund / industry commentary
+- It mentions the firm but does not evaluate it
+- It passively references context without engaging it
+- It requires interpretation leaps to connect to the firm
 
-Additional constraints:
-- Do NOT score generic advice, resume discussion, academic discussion, or industry commentary unless it clearly resolves to "{FUND_NAME}"
-- Do NOT inherit sentiment from PARENT TEXT unless the EVENT TEXT actively engages with it
-- If the EVENT TEXT mentions "{FUND_NAME}" but contains no evaluative signal and does not modify an existing evaluation, return null
+CRITICAL:
+If NO → you MUST return:
 
-CONTEXT-DEPENDENT RESPONSE RULE
+{
+  "sentiment": null,
+  "confidence": 0.0,
+  "explanation": "not a firm-specific sentiment event"
+}
 
-If the EVENT TEXT is brief, vague, or does not contain a clear standalone opinion:
+STOP. Do not score.
 
-- Do NOT evaluate it independently
-- Use PARENT TEXT as the primary source of meaning
-- Treat the EVENT TEXT as modifying, reinforcing, questioning, reacting to, or narrowing the meaning of the PARENT TEXT
-- If the PARENT TEXT provides clear directional sentiment about "{FUND_NAME}", inherit that direction and then adjust magnitude and confidence based on how strongly the EVENT TEXT reinforces or changes it
-- If the EVENT TEXT weakens, hedges, narrows, questions, or partially distances itself from the PARENT TEXT, reduce magnitude toward neutral
-- If the EVENT TEXT is merely reactive and does not actively engage with or modify the firm's reputation, inherited sentiment should remain very small or move to 0.0
-- If the PARENT TEXT is missing, unclear, or not about "{FUND_NAME}", return sentiment = 0.0 with low confidence
+--------------------------------------------------
+CONTEXT USAGE (ONLY AFTER PASSING GATE)
+--------------------------------------------------
 
-Important:
-Do NOT amplify weak or incidental mentions from PARENT TEXT into meaningful sentiment.
+If the event passes the gate:
 
-Scope rules:
-- Score sentiment ABOUT "{FUND_NAME}" only
-- Do NOT score other firms unless comparison clearly changes perception of "{FUND_NAME}"
+- EVENT TEXT is still primary
+- PARENT TEXT is only used to resolve meaning
 
-Firm-link discipline:
-- If the EVENT TEXT is only about hedge funds, prop shops, multistrats, HFTs, or buy-side roles generally, do not convert that into firm-specific sentiment unless "{FUND_NAME}" is clearly the actual referent
-- If the row is only category-level rather than firm-specific, sentiment should be 0.0
-- Do not infer firm-specific reputation from generic sector commentary
+If EVENT TEXT is weak/short:
+- Inherit direction ONLY if it is clearly about "{FUND_NAME}"
+- Adjust magnitude based on how strongly EVENT TEXT reinforces or modifies it
 
-Your role:
-Review the two model outputs and determine the most accurate interpretation of the reputational signal.
-You may:
-- choose model A
-- choose model B
-- synthesize a better final judgment
+If EVENT TEXT does NOT actively engage the parent:
+→ treat as nondiagnostic (≈ 0.0)
 
-Do NOT simply average the two scores mechanically.
+Do NOT manufacture sentiment from context.
 
-Critical rule:
-- If the event passes the validation gate and is relevant to "{FUND_NAME}", you must return a numeric sentiment score
-- Relevant but nondiagnostic rows should usually return sentiment = 0.0 with confidence > 0.0
-- Return null only if the event fails the validation gate
+--------------------------------------------------
+DISAGREEMENT RESOLUTION
+--------------------------------------------------
 
-Range usage rule:
-- Use the full -1.0 to 1.0 range when warranted
-- Do not compress meaningful signals toward 0.0 just because they are subtle
-- If "{FUND_NAME}" appears in an evaluative context, a score between -0.05 and +0.05 should be rare
-- If the signal is real but mild, prefer roughly ±0.1 to ±0.3 rather than 0.0
-- Use larger magnitudes such as ±0.6 to ±0.9 for clearly strong employer signals
-- Reserve 0.0 for cases where the event is relevant but genuinely nondiagnostic rather than weakly directional
-- Do not use low confidence as a reason to compress a directional sentiment score toward 0.0
+You are given two model outputs.
 
-Magnitude guidance:
-- Use small values for weak signals
-- Do not exaggerate mild prestige mentions into strong positive sentiment
-- Do not exaggerate vague criticism into strong negative sentiment
-- If the event contains even a weak evaluative signal about "{FUND_NAME}", do not collapse it to 0.0. Use a small directional score instead
+You must:
+- choose A
+- choose B
+- OR produce a better judgment
 
-Confidence guidance:
+Do NOT average blindly.
 
-High confidence
-- explicit firm-specific reputational signal
+--------------------------------------------------
+SCORING RULES
+--------------------------------------------------
 
-Medium confidence
-- indirect but clear signal
+- Use full range [-1.0, 1.0]
+- Weak but real signals: ±0.1–0.3
+- Strong signals: ±0.5–0.9
+- 0.0 ONLY if:
+  - event is valid but truly nondiagnostic
 
-Low confidence
-- weak but still meaningful signal
+If there is ANY real evaluative signal:
+→ DO NOT return 0.0
 
-Confidence must be 0 only if the event is unrelated to the firm or fails the validation gate.
+--------------------------------------------------
+CONFIDENCE
+--------------------------------------------------
 
-Prior model outputs:
-Model A sentiment: {MODEL_A_SENTIMENT}
-Model A confidence: {MODEL_A_CONFIDENCE}
-Model B sentiment: {MODEL_B_SENTIMENT}
-Model B confidence: {MODEL_B_CONFIDENCE}
+High: explicit firm evaluation  
+Medium: clear but indirect  
+Low: weak but real  
+
+0.0 ONLY if invalid (gate failed)
+
+--------------------------------------------------
+PRIOR MODEL OUTPUTS
+--------------------------------------------------
+
+Model A sentiment: {MODEL_A_SENTIMENT}  
+Model A confidence: {MODEL_A_CONFIDENCE}  
+
+Model B sentiment: {MODEL_B_SENTIMENT}  
+Model B confidence: {MODEL_B_CONFIDENCE}  
+
+--------------------------------------------------
+OUTPUT FORMAT (STRICT)
+--------------------------------------------------
 
 Return valid JSON only.
-No markdown fences.
-No extra text.
 
-Return exactly this object shape:
-
-{{
-  "sentiment": <number from -1.0 to 1.0 or null>,
-  "confidence": <number from 0.0 to 1.0>,
+{
+  "sentiment": <number or null>,
+  "confidence": <0.0–1.0>,
   "explanation": "<brief explanation>"
-}}
+}
 
-Firm: {FUND_NAME}
-Matched aliases: {MATCHED_ALIASES}
-Candidate source: {CANDIDATE_SOURCE}
+--------------------------------------------------
+INPUT
+--------------------------------------------------
+
+Firm: {FUND_NAME}  
+Matched aliases: {MATCHED_ALIASES}  
+Candidate source: {CANDIDATE_SOURCE}  
 
 Thread title:
 {THREAD_TITLE}
