@@ -1243,9 +1243,9 @@ def main():
         if args.debug_save_raw:
             df.at[idx, "primary_a_raw"] = a_raw
             df.at[idx, "primary_b_raw"] = b_raw
-
-        a_valid = is_valid_score(a_s, a_c)
-        b_valid = is_valid_score(b_s, b_c)
+        
+        a_valid = is_valid_score(a_s, adj_a_c)
+        b_valid = is_valid_score(b_s, adj_b_c)
         
         if not a_valid and not b_valid:
             df.at[idx, "solomon_triggered"] = False
@@ -1350,7 +1350,8 @@ def main():
                 rows_since_full_autosave = 0
         
             continue
-        solomon = should_trigger_solomon(a_s, a_c, a_sc, b_s, b_c, b_sc, disagree_threshold)
+            
+        solomon = should_trigger_solomon(a_s, adj_a_c, a_sc, b_s, adj_b_c, b_sc, disagree_threshold)
         df.at[idx, "solomon_triggered"] = solomon
 
         if solomon:
@@ -1416,7 +1417,7 @@ def main():
         print(
             f"[{counter}/{total_pending}] "
             f"{event_key} | {row['canonical_name']} | source={row['source_bucket']} | "
-            f"A={a_sc} | B={b_sc} | solomon={solomon} | final={final_sc} | "
+            f"A={a_sc} (c={adj_a_c}) | B={b_sc} (c={adj_b_c}) | solomon={solomon} | final={final_sc} | "
             f"final_source={final_reason_source} | "
             f"A_reason={short_reason(a_reason)} | "
             f"B_reason={short_reason(b_reason)}"
