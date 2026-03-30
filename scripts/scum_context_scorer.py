@@ -27,6 +27,8 @@ COMPLETED_REASON_SOURCES = {
     "primary_avg_tiebreaker_failed",
     "firm_link_category",
     "firm_link_drop",
+    "primary_a_only",
+    "primary_b_only",
 }
 
 STATEFUL_COLUMNS = [
@@ -1244,8 +1246,8 @@ def main():
 
         a_valid = is_valid_score(a_s, a_c)
         b_valid = is_valid_score(b_s, b_c)
-
-        if not (a_valid and b_valid):
+        
+        if not a_valid and not b_valid:
             df.at[idx, "solomon_triggered"] = False
             df.at[idx, "final_sentiment"] = None
             df.at[idx, "final_confidence"] = None
@@ -1255,37 +1257,99 @@ def main():
                 f"A_reason={safe_text(a_reason)} | B_reason={safe_text(b_reason)}"
             )
             df.at[idx, "final_reason_source"] = "primary_failure"
-
+        
             print(
                 f"[{counter}/{total_pending}] {event_key} | {row['canonical_name']} | "
                 f"source={row['source_bucket']} | PRIMARY FAILURE | "
                 f"A_status={a_status} | B_status={b_status}"
             )
-
-            print(
-                f"[{counter}/{total_pending}] "
-                f"{event_key} | {row['canonical_name']} | source={row['source_bucket']} | "
-                f"A={a_sc} | B={b_sc} | solomon=False | final=None | "
-                f"final_source=primary_failure | "
-                f"A_reason={short_reason(a_reason)} | "
-                f"B_reason={short_reason(b_reason)}"
-            )
-
+        
             rows_since_checkpoint += 1
             rows_since_full_autosave += 1
-
+        
             if rows_since_checkpoint >= checkpoint_every:
                 outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix=args.output_prefix)
                 print(f"CHECKPOINT SAVED: {outfile}")
                 rows_since_checkpoint = 0
-
+        
             if rows_since_full_autosave >= full_autosave_every:
                 outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix=args.output_prefix)
                 print(f"FULL AUTOSAVED: {outfile}")
                 rows_since_full_autosave = 0
-
+        
             continue
-
+        
+        if a_valid and not b_valid:
+            final_s = round(a_s, 4)
+            final_c = round(adj_a_c, 4) if adj_a_c is not None else round(a_c, 4)
+            final_sc = a_sc
+            final_reason = f"A_only:{safe_text(a_reason)} | B_failed:{b_status}"
+            final_reason_source = "primary_a_only"
+        
+            df.at[idx, "solomon_triggered"] = False
+            df.at[idx, "final_sentiment"] = final_s
+            df.at[idx, "final_confidence"] = final_c
+            df.at[idx, "final_scum"] = final_sc
+            df.at[idx, "final_reason"] = final_reason
+            df.at[idx, "final_reason_source"] = final_reason_source
+        
+            print(
+                f"[{counter}/{total_pending}] "
+                f"{event_key} | {row['canonical_name']} | source={row['source_bucket']} | "
+                f"A={a_sc} | B={b_sc} | solomon=False | final={final_sc} | "
+                f"final_source={final_reason_source}"
+            )
+        
+            rows_since_checkpoint += 1
+            rows_since_full_autosave += 1
+        
+            if rows_since_checkpoint >= checkpoint_every:
+                outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix=args.output_prefix)
+                print(f"CHECKPOINT SAVED: {outfile}")
+                rows_since_checkpoint = 0
+        
+            if rows_since_full_autosave >= full_autosave_every:
+                outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix=args.output_prefix)
+                print(f"FULL AUTOSAVED: {outfile}")
+                rows_since_full_autosave = 0
+        
+            continue
+        
+        if b_valid and not a_valid:
+            final_s = round(b_s, 4)
+            final_c = round(adj_b_c, 4) if adj_b_c is not None else round(b_c, 4)
+            final_sc = b_sc
+            final_reason = f"B_only:{safe_text(b_reason)} | A_failed:{a_status}"
+            final_reason_source = "primary_b_only"
+        
+            df.at[idx, "solomon_triggered"] = False
+            df.at[idx, "final_sentiment"] = final_s
+            df.at[idx, "final_confidence"] = final_c
+            df.at[idx, "final_scum"] = final_sc
+            df.at[idx, "final_reason"] = final_reason
+            df.at[idx, "final_reason_source"] = final_reason_source
+        
+            print(
+                f"[{counter}/{total_pending}] "
+                f"{event_key} | {row['canonical_name']} | source={row['source_bucket']} | "
+                f"A={a_sc} | B={b_sc} | solomon=False | final={final_sc} | "
+                f"final_source={final_reason_source}"
+            )
+        
+            rows_since_checkpoint += 1
+            rows_since_full_autosave += 1
+        
+            if rows_since_checkpoint >= checkpoint_every:
+                outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix=args.output_prefix)
+                print(f"CHECKPOINT SAVED: {outfile}")
+                rows_since_checkpoint = 0
+        
+            if rows_since_full_autosave >= full_autosave_every:
+                outfile = save_checkpoint_df(df, paths["scored_events_dir"], prefix=args.output_prefix)
+                print(f"FULL AUTOSAVED: {outfile}")
+                rows_since_full_autosave = 0
+        
+            continue
         solomon = should_trigger_solomon(a_s, a_c, a_sc, b_s, b_c, b_sc, disagree_threshold)
         df.at[idx, "solomon_triggered"] = solomon
 
