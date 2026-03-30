@@ -350,7 +350,8 @@ def extract_json_payload(text: Any) -> Optional[Dict[str, Any]]:
     try:
         payload = json.loads(text)
         if isinstance(payload, dict):
-            return payload
+            return {k.lower(): v for k, v in payload.items()}
+  
     except Exception:
         pass
 
@@ -361,7 +362,7 @@ def extract_json_payload(text: Any) -> Optional[Dict[str, Any]]:
         try:
             payload = json.loads(block)
             if isinstance(payload, dict):
-                return payload
+                return {k.lower(): v for k, v in payload.items()}
         except Exception:
             pass
 
@@ -369,7 +370,7 @@ def extract_json_payload(text: Any) -> Optional[Dict[str, Any]]:
             block2 = re.sub(r"(?<!\\)'", '"', block)
             payload = json.loads(block2)
             if isinstance(payload, dict):
-                return payload
+                return {k.lower(): v for k, v in payload.items()}
         except Exception:
             pass
 
@@ -381,7 +382,7 @@ def extract_json_payload(text: Any) -> Optional[Dict[str, Any]]:
 
 
 def parse_sentiment_response(text: Any) -> Tuple[Optional[float], Optional[float], Optional[str], str]:
-    payload = extract_json_payload(text)
+    payload = extract_json_payload(text) or {}
     if not payload:
         return None, None, None, "parse_failure"
 
@@ -672,8 +673,55 @@ def call_and_parse_sentiment(
     max_tokens: int = 250,
     temperature: float = 0.1,
     retry_limit: int = 3,
-    semantic_retry_limit: int = 2,
+    semantic_retry_limit: int = 3,
 ) -> Tuple[Optional[float], Optional[float], Optional[str], str, str]:
+    last_raw = ""
+
+    for attempt in range(semantic_retry_limit):
+        effective_prompt = prompt
+        if attempt > 0:
+            effective_prompt = (
+                prompt
+                + "\n\nIMPORTANT: Return ONLY a valid JSON object with keys "
+                + '"sentiment", "confidence", and "explanation". '
+                + "Do NOT say 'Here is the JSON requested'. "
+                + "Do NOT use markdown fences. "
+                + "Do NOT output any text before or after the JSON."
+            )
+
+        raw = call_model(
+            model_name=model_name,
+            prompt=effective_prompt,
+            anthropic_client=anthropic_client,
+            openai_client=openai_client,
+            gemini_client=gemini_client,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            retry_limit=retry_limit,
+        )
+
+        last_raw = raw if isinstance(raw, str) else ""
+
+        cleaned = last_raw.strip()
+
+        cleaned = re.sub(
+            r"^here is the json requested:\s*",
+            "",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+
+        cleaned = strip_code_fences(cleaned).strip()
+
+        if not cleaned or "{" not in cleaned:
+            continue
+
+        sentiment, confidence, reason, status = parse_sentiment_response(cleaned)
+
+        if status in {"valid", "neutralized_abstention"}:
+            return sentiment, confidence, reason, last_raw, status
+
+    return None, None, None, last_raw, "parse_failure"
     last_raw = ""
 
     for attempt in range(semantic_retry_limit):
