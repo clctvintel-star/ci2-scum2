@@ -119,11 +119,11 @@ OUTPUT FORMAT (STRICT)
 
 Return valid JSON only.
 
-{
+{{
   "sentiment": <number or null>,
   "confidence": <0.0–1.0>,
   "explanation": "<brief explanation>"
-}
+}}
 
 --------------------------------------------------
 INPUT
