@@ -561,7 +561,6 @@ def call_openai(
             time.sleep(1)
     raise RuntimeError(f"OpenAI failed for {model_name}: {last_err}")
 
-
 def call_gemini(
     client,
     model_name: str,
@@ -580,6 +579,9 @@ def call_gemini(
                     "temperature": temperature,
                     "max_output_tokens": max_tokens,
                     "response_mime_type": "application/json",
+                    "thinking_config": {
+                        "thinking_budget": 0
+                    },
                 },
             )
             text = getattr(r, "text", None)
@@ -588,7 +590,6 @@ def call_gemini(
             last_err = e
             time.sleep(1)
     raise RuntimeError(f"Gemini failed for {model_name}: {last_err}")
-
 
 def call_model(
     model_name: str,
