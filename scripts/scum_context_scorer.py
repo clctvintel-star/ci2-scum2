@@ -580,6 +580,7 @@ def call_gemini(
     retry_limit: int = 3,
 ) -> str:
     last_err = None
+
     for _ in range(retry_limit):
         try:
             r = client.models.generate_content(
@@ -592,17 +593,26 @@ def call_gemini(
                 },
             )
 
-            # 🔥 HARD REQUIREMENT: extract text ONLY from candidates
-            if hasattr(r, "candidates") and r.candidates:
-                parts = r.candidates[0].content.parts
-                if parts and hasattr(parts[0], "text"):
-                    return parts[0].text
-
-            # fallback ONLY if clean text exists
+            # 1) clean text shortcut
             if hasattr(r, "text") and r.text:
                 return r.text
 
-            raise ValueError("No valid text in Gemini response")
+            # 2) walk candidates/parts safely
+            if hasattr(r, "candidates") and r.candidates:
+                texts = []
+                for cand in r.candidates:
+                    content = getattr(cand, "content", None)
+                    parts = getattr(content, "parts", None) if content is not None else None
+                    if parts:
+                        for part in parts:
+                            txt = getattr(part, "text", None)
+                            if txt:
+                                texts.append(txt)
+                if texts:
+                    return "\n".join(texts).strip()
+
+            # 3) last resort: stringify whole response for debug
+            raise ValueError(f"No valid text in Gemini response: {r}")
 
         except Exception as e:
             last_err = e
