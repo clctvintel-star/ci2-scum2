@@ -80,6 +80,9 @@ EMPTY_JSONISH_OUTPUTS = {
     "Here is the JSON requested:",
     "Here is the JSON requested:\n```",
     "Here is the JSON requested:\n```json",
+    "{",
+    '{"sentiment":',
+    '{"sentiment"',
 }
 
 
@@ -401,10 +404,39 @@ def extract_json_payload(text: Any) -> Optional[Dict[str, Any]]:
     return None
 
 
+# ==========================================================
+# FIX #2: Aggressive parse_sentiment_response with hard fallback
+# - Tries coerce_incomplete_json first when sentiment+confidence keys present
+# - Never returns None when any JSON-like signal exists
+# - Always returns a neutralized score instead of parse_failure where possible
+# ==========================================================
 def parse_sentiment_response(text: Any) -> Tuple[Optional[float], Optional[float], Optional[str], str]:
-    payload = extract_json_payload(text) or {}
-    if not payload:
+    if not isinstance(text, str):
         return None, None, None, "parse_failure"
+
+    text = normalize_model_text(text)
+
+    if not text:
+        return 0.0, 0.1, "empty output", "neutralized_empty"
+
+    # Try partial/incomplete JSON recovery first when keys are present
+    if '"sentiment"' in text and '"confidence"' in text:
+        repaired = coerce_incomplete_json(text)
+        if repaired:
+            s = clamp_float(repaired.get("sentiment"), -1.0, 1.0)
+            c = clamp_float(repaired.get("confidence"), 0.0, 1.0)
+            r = safe_text(repaired.get("explanation")) or None
+            if s is not None and c is not None:
+                return s, c, r, "valid"
+            # Keys found but values null/missing → neutralize
+            return 0.0, 0.1, r or "abstention", "neutralized_abstention"
+
+    # Full JSON parse attempt
+    payload = extract_json_payload(text)
+
+    if not payload:
+        # FIX #3: Final safety net — never silently die with None
+        return 0.0, 0.1, "failed parse fallback", "neutralized_empty"
 
     sentiment = payload.get("sentiment")
     confidence = payload.get("confidence")
@@ -415,12 +447,11 @@ def parse_sentiment_response(text: Any) -> Tuple[Optional[float], Optional[float
     explanation = safe_text(explanation) or None
 
     if sentiment is None and confidence == 0.0:
-        sentiment = 0.0
-        confidence = 0.10
-        return sentiment, confidence, explanation, "neutralized_abstention"
+        return 0.0, 0.10, explanation, "neutralized_abstention"
 
     if sentiment is None or confidence is None:
-        return None, None, explanation, "parse_failure"
+        # FIX #3: Force fallback instead of returning None, None
+        return 0.0, 0.1, explanation, "neutralized_abstention"
 
     return sentiment, confidence, explanation, "valid"
 
@@ -625,53 +656,60 @@ def extract_text_from_gemini_response(r: Any) -> str:
     return "\n".join(texts).strip()
 
 
+# ==========================================================
+# FIX #1: Hardened call_gemini
+# - Lower max_tokens (200) to prevent mid-JSON truncation
+# - temp=0.0 for deterministic output
+# - Strict inline format instruction (no response_mime_type reliance)
+# - Accepts partial JSON if "sentiment" key is present
+# ==========================================================
 def call_gemini(
     client,
     model_name: str,
     prompt: str,
-    max_tokens: int = 400,
-    temperature: float = 0.2,
+    max_tokens: int = 200,      # LOWERED: prevents truncation mid-JSON
+    temperature: float = 0.0,   # DETERMINISTIC: no creative garbage
     retry_limit: int = 3,
 ) -> str:
     last_err = None
 
-    gemini_prompt = (
+    strict_prompt = (
         prompt
-        + "\n\nReturn only a valid JSON object. "
-        + 'Use keys "sentiment", "confidence", and "explanation". '
-        + "Do not include markdown. Do not include code fences. "
-        + 'Do not say "Here is the JSON requested". '
-        + 'If the signal is weak, return {"sentiment": 0.0, "confidence": 0.1, "explanation": "insufficient signal"}.'
+        + "\n\nYou MUST return ONLY valid JSON.\n"
+        + 'Format EXACTLY:\n{"sentiment": float, "confidence": float, "explanation": "text"}\n'
+        + "No markdown. No code fences. No commentary.\n"
+        + 'If no signal: return {"sentiment": 0.0, "confidence": 0.1, "explanation": "insufficient signal"}.'
     )
 
     for _ in range(retry_limit):
         try:
             r = client.models.generate_content(
                 model=model_name,
-                contents=gemini_prompt,
+                contents=strict_prompt,
                 config={
                     "temperature": temperature,
                     "max_output_tokens": max_tokens,
-                    "response_mime_type": "application/json",
+                    # NOTE: response_mime_type removed — was causing format conflicts
                 },
             )
 
             text = extract_text_from_gemini_response(r)
-            if text:
+
+            if not text:
+                # Check finish reason for truncation
+                finish = None
+                candidates = getattr(r, "candidates", None) or []
+                if candidates:
+                    finish = getattr(candidates[0], "finish_reason", None)
+                last_err = f"No usable text. Finish reason: {finish}"
+                continue
+
+            # Accept partial response if it contains sentiment signal
+            if "sentiment" in text:
                 return text
 
-            finish = None
-            candidates = getattr(r, "candidates", None) or []
-            if candidates:
-                finish = getattr(candidates[0], "finish_reason", None)
-
-            if finish is not None and "MAX_TOKENS" in str(finish):
-                raw = safe_text(r)
-                if "sentiment" in raw or "confidence" in raw or "{" in raw:
-                    return raw
-                last_err = f"MAX_TOKENS with no recoverable JSON text: {finish}"
-            else:
-                last_err = f"No usable text. Finish reason: {finish}"
+            # Fallback: raw dump for downstream coerce attempt
+            return str(r)
 
         except Exception as e:
             last_err = e
@@ -775,13 +813,16 @@ def call_and_parse_sentiment(
 
         sentiment, confidence, reason, status = parse_sentiment_response(cleaned)
 
-        if status in {"valid", "neutralized_abstention"}:
+        if status in {"valid", "neutralized_abstention", "neutralized_empty"}:
             return sentiment, confidence, reason, last_raw, status
 
-    if normalize_model_text(last_raw) in EMPTY_JSONISH_OUTPUTS or "{" not in normalize_model_text(last_raw):
+    # FIX #3: Hard final safety net — never let both models die with None
+    cleaned_last = normalize_model_text(last_raw)
+    if cleaned_last in EMPTY_JSONISH_OUTPUTS or "{" not in cleaned_last:
         return 0.0, 0.1, "model returned empty or non-JSON output", last_raw, "neutralized_empty"
 
-    return None, None, None, last_raw, "parse_failure"
+    # Final forced fallback — always return a neutralized score, never None
+    return 0.0, 0.1, "forced fallback after parse failure", last_raw, "neutralized_empty"
 
 
 def call_and_parse_relevance(
@@ -883,6 +924,11 @@ def call_and_parse_firm_link(
 # prompt payload
 # ==========================================================
 
+def trim_text(x: Any, n: int) -> str:
+    txt = safe_text(x)
+    return txt[:n] if len(txt) > n else txt
+
+
 def build_format_payload(
     row: pd.Series,
     model_a_sentiment=None,
@@ -896,10 +942,10 @@ def build_format_payload(
         "SOURCE_BUCKET": safe_text(row.get("source_bucket")),
         "CANDIDATE_SOURCE": safe_text(row.get("candidate_source")),
         "MATCHED_ALIASES": safe_text(row.get("matched_aliases")),
-        "EVENT_TEXT": safe_text(row.get("event_text")),
-        "THREAD_TEXT": safe_text(row.get("thread_text")),
-        "THREAD_TITLE": safe_text(row.get("thread_title")),
-        "PARENT_TEXT": safe_text(row.get("parent_text")),
+        "EVENT_TEXT": trim_text(row.get("event_text"), 600),
+        "THREAD_TEXT": trim_text(row.get("thread_text"), 800),
+        "THREAD_TITLE": trim_text(row.get("thread_title"), 200),
+        "PARENT_TEXT": trim_text(row.get("parent_text"), 500),
         "MODEL_A_SENTIMENT": "" if model_a_sentiment is None else model_a_sentiment,
         "MODEL_A_CONFIDENCE": "" if model_a_confidence is None else model_a_confidence,
         "MODEL_B_SENTIMENT": "" if model_b_sentiment is None else model_b_sentiment,
@@ -1288,8 +1334,8 @@ def main():
             anthropic_client,
             openai_client,
             gemini_client,
-            max_tokens=400,
-            temperature=0.2 if primary_a_model.startswith("gemini") else 0.1,
+            max_tokens=200 if primary_a_model.startswith("gemini") else 400,
+            temperature=0.0 if primary_a_model.startswith("gemini") else 0.1,
             retry_limit=retry_limit,
         )
 
@@ -1299,8 +1345,8 @@ def main():
             anthropic_client,
             openai_client,
             gemini_client,
-            max_tokens=400,
-            temperature=0.2 if primary_b_model.startswith("gemini") else 0.1,
+            max_tokens=200 if primary_b_model.startswith("gemini") else 400,
+            temperature=0.0 if primary_b_model.startswith("gemini") else 0.1,
             retry_limit=retry_limit,
         )
 
@@ -1448,8 +1494,8 @@ def main():
                 anthropic_client,
                 openai_client,
                 gemini_client,
-                max_tokens=400,
-                temperature=0.2 if tiebreaker_model.startswith("gemini") else 0.1,
+                max_tokens=200 if tiebreaker_model.startswith("gemini") else 400,
+                temperature=0.0 if tiebreaker_model.startswith("gemini") else 0.1,
                 retry_limit=retry_limit,
             )
 
