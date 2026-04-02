@@ -1,9 +1,15 @@
 You are scoring ONE Reddit event for hedge fund reputation analysis.
 
-Task:
+---
+
+## TASK
+
 Evaluate how this specific EVENT TEXT affects the perceived reputation of "{FUND_NAME}" from the perspective of a potential job applicant.
 
-Core rule:
+---
+
+## CORE RULE
+
 The EVENT TEXT is the primary unit of analysis.
 
 Use THREAD TITLE, THREAD TEXT, and PARENT TEXT only to:
@@ -13,16 +19,16 @@ Use THREAD TITLE, THREAD TEXT, and PARENT TEXT only to:
 
 Do NOT score the whole thread.
 
--------------------------
-CONTEXT USE RULE
--------------------------
+---
+
+## CONTEXT USE RULE
 
 If EVENT TEXT is clear and evaluative on its own:
 - Score it directly.
 
 If EVENT TEXT depends on context (short replies, agreement, reactions, etc.):
 - Use PARENT TEXT to interpret meaning.
-- Determine whether the EVENT TEXT is reinforcing, agreeing, disagreeing, questioning, or modifying the parent.
+- Determine whether the EVENT TEXT reinforces, agrees, disagrees, questions, or modifies the parent.
 
 After meaning is resolved:
 - Assign sentiment based on the interpreted meaning.
@@ -30,98 +36,138 @@ After meaning is resolved:
 IMPORTANT:
 Do NOT reduce magnitude simply because the EVENT TEXT is short or context-dependent.
 
--------------------------
-CONTEXT MAGNITUDE RULE
--------------------------
+---
 
-- If EVENT TEXT reinforces or agrees with a strong opinion in the PARENT TEXT, you may assign a similar magnitude.
-- If EVENT TEXT weakens, hedges, or partially disagrees, reduce magnitude accordingly.
-- If EVENT TEXT is neutral or purely reactive (no reputational signal), move toward 0.0.
+## CONTEXT MAGNITUDE RULE
 
-Magnitude should reflect the strength of the interpreted reputational signal, not the length or independence of the EVENT TEXT.
+- Agreement with a strong parent signal may justify similar magnitude.
+- Weakening, hedging, or partial disagreement should reduce magnitude.
+- Purely reactive or non-evaluative responses should move toward 0.0.
 
--------------------------
-SCOPE RULES
--------------------------
+Magnitude reflects perceived reputational impact, not text length.
+
+---
+
+## SCOPE RULES
 
 - Score sentiment ABOUT "{FUND_NAME}" only.
 - Do NOT score other firms unless comparison clearly changes perception of "{FUND_NAME}".
 - If the event is only about hedge funds or the industry generally, assign sentiment = 0.0 unless "{FUND_NAME}" is clearly the referent.
 
--------------------------
-RANGE USAGE RULE
--------------------------
+---
+
+## SIGNAL TYPE DISTINCTION (CRITICAL)
+
+Distinguish between three types of signals:
+
+### 1. Evaluative reputation (strong signal)
+Explicit judgments about the firm (e.g., prestige, pay, culture, toxicity, selectivity)
+
+→ Use full range (±0.2 to ±0.9)
+
+---
+
+### 2. Implied desirability (moderate signal)
+Interest in the firm as an employer, including:
+- applying or interviewing
+- comparing offers
+- asking about difficulty or process
+- inclusion in a clearly evaluative or “top firms” context
+
+→ Small positive signal (≈ +0.05 to +0.20)
+
+IMPORTANT:
+Interest alone is weak evidence. Do NOT over-scale it.
+
+---
+
+### 3. Mere presence (no real signal)
+- appearing in a list without evaluation
+- being mentioned alongside other firms
+- factual or incidental references
+
+→ 0.0 to +0.05 maximum
+
+IMPORTANT:
+Do NOT treat simple mention, visibility, or association as meaningful reputation.
+
+---
+
+## RANGE USAGE RULE
 
 Use the full -1.0 to 1.0 range when warranted.
 
-If a plausible reputational interpretation exists, do not return 0.0.
-Prefer a small directional score instead.
-
 Calibration guide:
 
-+0.7 to +0.9
-- Exceptional prestige, elite status, extremely strong desirability
++0.7 to +0.9  
+- Exceptional prestige, elite desirability  
 
-+0.3 to +0.6
-- Clearly positive employer perception
++0.3 to +0.6  
+- Clearly positive employer perception  
 
-+0.1 to +0.3
-- Mild but real positive signal
++0.1 to +0.3  
+- Mild but real positive signal  
 
-0.0
-- Relevant but nondiagnostic
+0.0  
+- Relevant but nondiagnostic  
 
--0.1 to -0.3
-- Mild negative signal
+-0.1 to -0.3  
+- Mild negative signal  
 
--0.3 to -0.6
-- Clearly negative perception
+-0.3 to -0.6  
+- Clearly negative perception  
 
--0.6 to -0.9
-- Strong negative signal (toxic, layoffs, severe criticism)
+-0.6 to -0.9  
+- Strong negative signal  
 
 IMPORTANT:
 - Do NOT cluster meaningful signals near 0.0.
-- If the event conveys a real signal, even if mild, do NOT default to 0.0.
+- If a real signal exists, do NOT default to 0.0.
 - Do NOT favor lower-magnitude scores solely due to uncertainty.
 
+---
 
--------------------------
-WEAK SIGNAL GUIDANCE
--------------------------
+## WEAK SIGNAL GUIDANCE
 
-Indirect signals (list inclusion, casual mention, vague salience):
+Indirect signals (lists, casual mentions, vague awareness):
 
-- Should be very small (≈ ±0.01 to ±0.05)
-- Must NOT exceed ±0.05 unless the event contains explicit evaluative language about "{FUND_NAME}"
+- Must remain small (≈ ±0.01 to ±0.05)
+- Must NOT exceed ±0.05 unless evaluative meaning is clearly implied
 - Should carry low confidence
-
-Examples of weak signals:
-- appearing in a list of firms
-- being mentioned alongside other firms
-- general awareness or presence without evaluation
 
 IMPORTANT:
 
-Do NOT treat mere mention, association, or visibility as meaningful positive sentiment.
+Mere mention is NOT reputation.
 
-If the signal is indirect and non-evaluative, keep magnitude very close to zero.
+Only move above ±0.05 if:
+- desirability is implied, OR
+- context clearly conveys evaluation
+
+---
+
+## INFORMATION-SEEKING RULE
+
+Information-seeking or process-related posts (interviews, hiring, case studies, preparation):
+
+- Usually imply weak positive desirability
+- Should be scored ≈ +0.05 to +0.15
 
 BUT:
 
-If context clearly implies a meaningful reputational signal (e.g., strong agreement with a clear positive/negative claim), do NOT force it into a near-zero range.
+If no desirability or evaluation is implied:
+- Assign 0.0
 
--------------------------
-CRITICAL RULE
--------------------------
+---
+
+## CRITICAL RULE
 
 If the event is relevant to "{FUND_NAME}", you MUST return a numeric sentiment score.
 
 Return null ONLY if the event is genuinely unrelated.
 
--------------------------
-CONFIDENCE GUIDANCE
--------------------------
+---
+
+## CONFIDENCE GUIDANCE
 
 High:
 - explicit, clear reputational statement
@@ -134,34 +180,36 @@ Low:
 
 Confidence reflects certainty, NOT magnitude.
 
--------------------------
-OUTPUT FORMAT
--------------------------
+---
 
-Return valid JSON only.
-No markdown.
+## OUTPUT FORMAT
+
+Return valid JSON only.  
+No markdown.  
 No extra text.
 
-{{
+{
   "sentiment": -0.5,
   "confidence": 0.7,
   "explanation": "brief explanation"
-}}
+}
 
--------------------------
+---
 
-Firm: {FUND_NAME}
-Matched aliases: {MATCHED_ALIASES}
+## INPUT
+
+Firm: {FUND_NAME}  
+Matched aliases: {MATCHED_ALIASES}  
 Candidate source: {CANDIDATE_SOURCE}
 
-Thread title:
+Thread title:  
 {THREAD_TITLE}
 
-Thread text:
+Thread text:  
 {THREAD_TEXT}
 
-Parent text:
+Parent text:  
 {PARENT_TEXT}
 
-Event text:
+Event text:  
 {EVENT_TEXT}
