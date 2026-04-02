@@ -153,11 +153,11 @@ OUTPUT
 
 Return valid JSON only.
 
-{
+{{
   "sentiment": <number -1.0 to 1.0 or null>,
   "confidence": <number 0.0 to 1.0>,
   "explanation": "<brief explanation>"
-}
+}}
 
 -------------------------
 
