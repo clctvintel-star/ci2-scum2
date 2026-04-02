@@ -70,13 +70,29 @@ Use the full -1.0 to 1.0 range.
 WEAK SIGNAL GUIDANCE
 -------------------------
 
--If a plausible reputational interpretation exists, do not return 0.0.
+If a plausible reputational interpretation exists, do not return 0.0.
 Prefer a small directional score instead.
 
-- Indirect signals should be small (≈ ±0.01–0.10)
+Indirect signals (list inclusion, casual mention, vague salience):
+
+- Should be very small (≈ ±0.01 to ±0.05)
+- Must NOT exceed ±0.05 unless the EVENT TEXT or context contains explicit evaluative language about "{FUND_NAME}"
+- Should carry low confidence
+
+Examples of weak signals:
+- appearing in a list of firms
+- being mentioned alongside other firms
+- general awareness or presence without evaluation
+
+IMPORTANT:
+
+Do NOT treat mere mention, association, or visibility as meaningful positive sentiment.
+
+If the signal is indirect and non-evaluative, keep magnitude very close to zero.
 
 BUT:
-If context implies a real reputational signal, do NOT force near-zero.
+
+If context implies a clear reputational judgment (e.g., strong agreement with a positive/negative claim), assign magnitude consistent with that signal.
 
 -------------------------
 CRITICAL RULE
