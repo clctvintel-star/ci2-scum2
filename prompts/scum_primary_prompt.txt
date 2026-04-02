@@ -91,12 +91,24 @@ WEAK SIGNAL GUIDANCE
 
 Indirect signals (list inclusion, casual mention, vague salience):
 
-- Should be small (≈ ±0.01 to ±0.10)
+- Should be very small (≈ ±0.01 to ±0.05)
+- Must NOT exceed ±0.05 unless the event contains explicit evaluative language about "{FUND_NAME}"
 - Should carry low confidence
+
+Examples of weak signals:
+- appearing in a list of firms
+- being mentioned alongside other firms
+- general awareness or presence without evaluation
+
+IMPORTANT:
+
+Do NOT treat mere mention, association, or visibility as meaningful positive sentiment.
+
+If the signal is indirect and non-evaluative, keep magnitude very close to zero.
 
 BUT:
 
-If context clearly implies a meaningful reputational signal, do NOT force it into a near-zero range.
+If context clearly implies a meaningful reputational signal (e.g., strong agreement with a clear positive/negative claim), do NOT force it into a near-zero range.
 
 -------------------------
 CRITICAL RULE
