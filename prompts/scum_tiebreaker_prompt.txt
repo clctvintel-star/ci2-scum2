@@ -5,98 +5,120 @@ Determine the most accurate sentiment score for how this specific EVENT TEXT aff
 
 The EVENT TEXT is the primary unit of analysis.
 
-Use THREAD TITLE, THREAD TEXT, and PARENT TEXT only to resolve:
-- shorthand
-- aliases
-- pronouns
-- sarcasm
-- comparisons
-- inherited context
+Use THREAD TITLE, THREAD TEXT, and PARENT TEXT only to:
+- resolve references
+- interpret tone
+- understand context
 
 Do NOT score the entire thread.
 
-CONTEXT-DEPENDENT RESPONSE RULE
+-------------------------
+CONTEXT USE RULE
+-------------------------
 
-If the EVENT TEXT is brief, vague, or does not contain a clear standalone opinion:
+If EVENT TEXT is clear:
+- Score it directly.
 
-- Do NOT evaluate it independently.
-- Use PARENT TEXT as the primary source of meaning.
-- Treat the EVENT TEXT as modifying, reinforcing, questioning, reacting to, or narrowing the meaning of the PARENT TEXT.
-- If the PARENT TEXT provides clear directional sentiment about "{FUND_NAME}", inherit that direction and then adjust magnitude and confidence based on how strongly the EVENT TEXT reinforces or changes it.
-- If the EVENT TEXT weakens, hedges, narrows, questions, or partially distances itself from the PARENT TEXT, reduce magnitude toward neutral.
-- If the EVENT TEXT is merely reactive and does not actively engage with or modify the firm's reputation, inherited sentiment should remain very small or move to 0.0.
-- If the PARENT TEXT is missing, unclear, or not about "{FUND_NAME}", return sentiment = 0.0 with low confidence.
+If EVENT TEXT depends on context:
+- Use PARENT TEXT to interpret meaning.
+- Determine whether the EVENT TEXT reinforces, agrees, disagrees, or modifies the parent.
 
-Important:
-Do NOT amplify weak or incidental mentions from PARENT TEXT into meaningful sentiment.
+After meaning is resolved:
+- Assign sentiment based on interpreted meaning.
 
-Score sentiment ABOUT "{FUND_NAME}" only.
-Do NOT score other firms unless comparison clearly changes perception of "{FUND_NAME}".
+IMPORTANT:
+Do NOT reduce magnitude simply because the EVENT TEXT is short or context-dependent.
 
-Firm-link discipline:
-- If the EVENT TEXT is only about hedge funds, prop shops, multistrats, HFTs, or buy-side roles generally, do not convert that into firm-specific sentiment unless "{FUND_NAME}" is clearly the actual referent.
-- If the row is only category-level rather than firm-specific, sentiment should be 0.0.
-- Do not infer firm-specific reputation from generic sector commentary.
+-------------------------
+CONTEXT MAGNITUDE RULE
+-------------------------
 
-Your role:
-Review the two model outputs and determine the most accurate interpretation of the reputational signal.
+- Agreement with strong parent sentiment may justify similar magnitude.
+- Weakening or hedging should reduce magnitude.
+- Purely reactive content should move toward 0.0.
+
+Magnitude should reflect perceived reputational impact, not text length.
+
+-------------------------
+YOUR ROLE
+-------------------------
+
+Review both model outputs and determine the most accurate score.
+
 You may:
 - choose model A
 - choose model B
-- synthesize a better final judgment
+- produce a better value
 
-Do NOT simply average the two scores mechanically.
+Do NOT average mechanically.
 
-Critical rule:
-- If the event is relevant to "{FUND_NAME}", you must return a numeric sentiment score.
-- Relevant but nondiagnostic rows should usually return sentiment = 0.0 with confidence > 0.0.
-- Return null only if the event is genuinely not about "{FUND_NAME}" even after using thread and parent context.
+Do NOT default to the smaller magnitude unless clearly justified.
 
-Range usage rule:
-- Use the full -1.0 to 1.0 range when warranted.
-- Do not compress meaningful signals toward 0.0 just because they are subtle.
-- If "{FUND_NAME}" appears in an evaluative context, a score between -0.05 and +0.05 should be rare.
-- If the signal is real but mild, prefer roughly ±0.1 to ±0.3 rather than 0.0.
-- Use larger magnitudes such as ±0.6 to ±0.9 for clearly strong employer signals.
-- Reserve 0.0 for cases where the event is relevant but genuinely nondiagnostic rather than weakly directional.
-- Do not use low confidence as a reason to compress a directional sentiment score toward 0.0.
+-------------------------
+RANGE USAGE RULE
+-------------------------
 
-Magnitude guidance:
-- Use small values for weak signals.
-- Do not exaggerate mild prestige mentions into strong positive sentiment.
-- Do not exaggerate vague criticism into strong negative sentiment.
-- If the event contains even a weak evaluative signal about "{FUND_NAME}", do not collapse it to 0.0. Use a small directional score instead.
+Use the full -1.0 to 1.0 range.
 
-Confidence guidance:
+- Do NOT compress meaningful signals toward 0.0.
+- Mild signals should be around ±0.1–0.3
+- Strong signals may be ±0.5+
 
-High confidence
-- explicit firm-specific reputational signal
+0.0 is only for genuinely nondiagnostic cases.
 
-Medium confidence
-- indirect but clear signal
+-------------------------
+WEAK SIGNAL GUIDANCE
+-------------------------
 
-Low confidence
-- weak but still meaningful signal
+- Indirect signals should be small (≈ ±0.01–0.10)
 
-Confidence must be 0 only if the event is unrelated to the firm.
+BUT:
+If context implies a real reputational signal, do NOT force near-zero.
 
-Prior model outputs:
+-------------------------
+CRITICAL RULE
+-------------------------
+
+- If relevant to "{FUND_NAME}", you MUST return a numeric score.
+- Return null only if unrelated.
+
+-------------------------
+CONFIDENCE
+-------------------------
+
+High:
+- clear, explicit signal
+
+Medium:
+- indirect but interpretable
+
+Low:
+- weak but real
+
+Confidence does NOT determine magnitude.
+
+-------------------------
+INPUTS
+-------------------------
+
 Model A sentiment: {MODEL_A_SENTIMENT}
 Model A confidence: {MODEL_A_CONFIDENCE}
 Model B sentiment: {MODEL_B_SENTIMENT}
 Model B confidence: {MODEL_B_CONFIDENCE}
 
-Return valid JSON only.
-No markdown fences.
-No extra text.
+-------------------------
+OUTPUT
+-------------------------
 
-Return exactly this object shape:
+Return valid JSON only.
 
 {{
-  "sentiment": <number from -1.0 to 1.0 or null>,
-  "confidence": <number from 0.0 to 1.0>,
+  "sentiment": <number -1.0 to 1.0 or null>,
+  "confidence": <number 0.0 to 1.0>,
   "explanation": "<brief explanation>"
 }}
+
+-------------------------
 
 Firm: {FUND_NAME}
 Matched aliases: {MATCHED_ALIASES}
