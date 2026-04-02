@@ -83,7 +83,8 @@ Calibration guide:
 IMPORTANT:
 - Do NOT cluster meaningful signals near 0.0.
 - If the event conveys a real signal, even if mild, do NOT default to 0.0.
-- Do NOT reduce magnitude solely due to uncertainty.
+- Do NOT favor lower-magnitude scores solely due to uncertainty.
+
 
 -------------------------
 WEAK SIGNAL GUIDANCE
