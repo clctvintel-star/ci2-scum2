@@ -6,141 +6,133 @@ Evaluate how this specific EVENT TEXT affects the perceived reputation of "{FUND
 Core rule:
 The EVENT TEXT is the primary unit of analysis.
 
-Use THREAD TITLE, THREAD TEXT, and PARENT TEXT only to resolve:
-- shorthand
-- aliases
-- pronouns
-- sarcasm
-- comparisons
-- inherited context
+Use THREAD TITLE, THREAD TEXT, and PARENT TEXT only to:
+- resolve references (aliases, pronouns)
+- interpret tone (sarcasm, irony)
+- understand what the EVENT TEXT is responding to
 
 Do NOT score the whole thread.
 
-CONTEXT-DEPENDENT RESPONSE RULE
+-------------------------
+CONTEXT USE RULE
+-------------------------
 
-If the EVENT TEXT is brief, vague, or does not contain a clear standalone opinion (for example: short replies, acknowledgments, reactions, clarifications, agreement, disagreement, or statements that rely on prior context):
+If EVENT TEXT is clear and evaluative on its own:
+- Score it directly.
 
-- Do NOT evaluate it independently.
-- Use PARENT TEXT as the primary source of meaning.
-- Treat the EVENT TEXT as modifying, reinforcing, questioning, reacting to, or narrowing the meaning of the PARENT TEXT.
-- If the PARENT TEXT provides clear directional sentiment about "{FUND_NAME}", inherit that direction and then adjust magnitude and confidence based on how strongly the EVENT TEXT reinforces or changes it.
-- If the EVENT TEXT weakens, hedges, narrows, questions, or partially distances itself from the PARENT TEXT, reduce magnitude toward neutral.
-- If the EVENT TEXT is merely reactive and does not actively engage with or modify the firm's reputation, inherited sentiment should remain very small or move to 0.0.
-- If the PARENT TEXT is missing, unclear, or not about "{FUND_NAME}", return:
-  sentiment = 0.0
-  confidence = 0.1–0.2
+If EVENT TEXT depends on context (short replies, agreement, reactions, etc.):
+- Use PARENT TEXT to interpret meaning.
+- Determine whether the EVENT TEXT is reinforcing, agreeing, disagreeing, questioning, or modifying the parent.
 
-Important:
-Do NOT amplify weak or incidental mentions from PARENT TEXT into meaningful sentiment.
-
-This ensures dependent responses are scored based on their actual referent rather than treated as standalone signals.
-
-Scope rules:
-- Score sentiment ABOUT "{FUND_NAME}" only.
-- Do NOT score other firms unless comparison clearly changes perception of "{FUND_NAME}".
-- A context row may still be relevant even if the EVENT TEXT does not repeat the firm name, if the broader thread clearly establishes the subject.
-
-Firm-link discipline:
-- If the EVENT TEXT is only about hedge funds, prop shops, multistrats, HFTs, or buy-side roles generally, do not convert that into firm-specific sentiment unless "{FUND_NAME}" is clearly the actual referent.
-- If the row is only category-level rather than firm-specific, sentiment should be 0.0.
-- Do not infer firm-specific reputation from generic sector commentary.
-
-Range usage rule:
-- Use the full -1.0 to 1.0 range when warranted.
-- Do not cluster meaningful signals near 0.0.
-- If "{FUND_NAME}" appears in an evaluative context, a score between -0.05 and +0.05 should be rare.
-- If the event conveys a real but mild reputational signal, prefer scores of roughly ±0.1 to ±0.3 rather than 0.0.
-- Use larger magnitudes such as ±0.6 to ±0.9 for clearly strong employer signals, for example: exceptional prestige, very high pay, elite selectivity, serious layoffs, toxic culture, no return offer, scandals, or unusually strong praise or criticism.
-- Reserve 0.0 for cases where the event is relevant but genuinely nondiagnostic rather than weakly positive or weakly negative.
-- Do not use low confidence as a reason to compress a directional sentiment score toward 0.0.
-
-Job-seeker framing:
-Signals that matter include:
-- prestige
-- compensation
-- performance
-- culture
-- hiring difficulty
-- selectivity
-- elite status
-- exits
-- stability
-- layoffs
-- burnout
-- toxicity
-- training quality
-- internal mobility
-- return offers
-- turnover
-- politics
-- desirability as an employer
-
-Scoring rules:
-- Use a directional score when the event has a directional reputational effect.
-- Do not default to 0.0 merely because the signal is mild.
-- Score the NET reputational effect when both positives and negatives appear.
-- Use smaller magnitudes for weak signals.
-- If the event contains even a weak evaluative signal about "{FUND_NAME}", do not collapse it to 0.0. Use a small directional score instead.
-
-Weak-signal constraint:
-Indirect or ambient signals, for example list inclusion, casual mention, institutional context, or vague salience, must be scored with very small magnitudes.
-
-These signals should:
-- remain close to neutral
-- carry low confidence
-- not be treated as strong directional reputation events
-
-Critical rule:
-If the event is relevant to "{FUND_NAME}", you MUST return a numeric sentiment score.
-
-Relevant but nondiagnostic events should usually be scored:
-
-sentiment = 0.0
-confidence = low but greater than 0.0
-
-Return null ONLY if the event is genuinely unrelated to "{FUND_NAME}" even after using thread and parent context.
-
-Prestige-list caution:
-If the firm appears in a list of firms, employers, or market participants:
-
-- This may represent a weak prestige or salience signal.
-- However, such signals are indirect and non-evaluative.
-
-Scoring guidance:
-- If prestige is clearly implied but not directly evaluated, sentiment should typically fall between +0.01 and +0.05.
-- Do NOT assign moderate or strong positive scores based on list inclusion alone.
-- If the mention is purely factual or incidental, assign sentiment = 0.0.
-
-List inclusion should almost never exceed +0.05 in magnitude unless additional evaluative context is present.
-
-Confidence guidance:
-
-High confidence
-- explicit firm-specific reputational statement
-
-Medium confidence
-- indirect but clear signal from context
-
-Low confidence
-- weak but real signal
-
-Confidence must be 0 only if the event is unrelated to the firm.
+After meaning is resolved:
+- Assign sentiment based on the interpreted meaning.
 
 IMPORTANT:
-EVENT TEXT may depend on PARENT TEXT for meaning.
-Always resolve context using PARENT TEXT before assigning sentiment, especially for short or ambiguous responses.
+Do NOT reduce magnitude simply because the EVENT TEXT is short or context-dependent.
+
+-------------------------
+CONTEXT MAGNITUDE RULE
+-------------------------
+
+- If EVENT TEXT reinforces or agrees with a strong opinion in the PARENT TEXT, you may assign a similar magnitude.
+- If EVENT TEXT weakens, hedges, or partially disagrees, reduce magnitude accordingly.
+- If EVENT TEXT is neutral or purely reactive (no reputational signal), move toward 0.0.
+
+Magnitude should reflect the strength of the interpreted reputational signal, not the length or independence of the EVENT TEXT.
+
+-------------------------
+SCOPE RULES
+-------------------------
+
+- Score sentiment ABOUT "{FUND_NAME}" only.
+- Do NOT score other firms unless comparison clearly changes perception of "{FUND_NAME}".
+- If the event is only about hedge funds or the industry generally, assign sentiment = 0.0 unless "{FUND_NAME}" is clearly the referent.
+
+-------------------------
+RANGE USAGE RULE
+-------------------------
+
+Use the full -1.0 to 1.0 range when warranted.
+
+Calibration guide:
+
++0.7 to +0.9
+- Exceptional prestige, elite status, extremely strong desirability
+
++0.3 to +0.6
+- Clearly positive employer perception
+
++0.1 to +0.3
+- Mild but real positive signal
+
+0.0
+- Relevant but nondiagnostic
+
+-0.1 to -0.3
+- Mild negative signal
+
+-0.3 to -0.6
+- Clearly negative perception
+
+-0.6 to -0.9
+- Strong negative signal (toxic, layoffs, severe criticism)
+
+IMPORTANT:
+- Do NOT cluster meaningful signals near 0.0.
+- If the event conveys a real signal, even if mild, do NOT default to 0.0.
+- Do NOT reduce magnitude solely due to uncertainty.
+
+-------------------------
+WEAK SIGNAL GUIDANCE
+-------------------------
+
+Indirect signals (list inclusion, casual mention, vague salience):
+
+- Should be small (≈ ±0.01 to ±0.10)
+- Should carry low confidence
+
+BUT:
+
+If context clearly implies a meaningful reputational signal, do NOT force it into a near-zero range.
+
+-------------------------
+CRITICAL RULE
+-------------------------
+
+If the event is relevant to "{FUND_NAME}", you MUST return a numeric sentiment score.
+
+Return null ONLY if the event is genuinely unrelated.
+
+-------------------------
+CONFIDENCE GUIDANCE
+-------------------------
+
+High:
+- explicit, clear reputational statement
+
+Medium:
+- indirect but interpretable signal
+
+Low:
+- weak but real signal
+
+Confidence reflects certainty, NOT magnitude.
+
+-------------------------
+OUTPUT FORMAT
+-------------------------
 
 Return valid JSON only.
-No markdown fences.
+No markdown.
 No extra text.
-
-Return exactly this object shape:
 
 {{
   "sentiment": -0.5,
   "confidence": 0.7,
   "explanation": "brief explanation"
 }}
+
+-------------------------
 
 Firm: {FUND_NAME}
 Matched aliases: {MATCHED_ALIASES}
