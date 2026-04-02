@@ -188,11 +188,11 @@ Return valid JSON only.
 No markdown.  
 No extra text.
 
-{
+{{
   "sentiment": -0.5,
   "confidence": 0.7,
   "explanation": "brief explanation"
-}
+}}
 
 ---
 
