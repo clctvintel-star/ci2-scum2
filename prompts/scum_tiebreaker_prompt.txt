@@ -1,107 +1,116 @@
 You are resolving disagreement between two model scores for ONE Reddit event involving "{FUND_NAME}".
 
-Task:
-Determine the most accurate sentiment score for how this specific EVENT TEXT affects the perceived reputation of "{FUND_NAME}" from the perspective of a potential job applicant.
+Your goal:
+Determine the MOST ACCURATE sentiment score reflecting how the EVENT TEXT affects the perceived reputation of "{FUND_NAME}" from the perspective of a potential job applicant.
 
 The EVENT TEXT is the primary unit of analysis.
 
-Use THREAD TITLE, THREAD TEXT, and PARENT TEXT only to:
-- resolve references
-- interpret tone
-- understand context
-
-Do NOT score the entire thread.
+You are NOT summarizing the thread.
+You are NOT averaging model outputs.
+You are making a judgment call.
 
 -------------------------
-CONTEXT USE RULE
+CORE PRINCIPLE
+-------------------------
+
+Score the reputational signal conveyed by the EVENT TEXT.
+
+Context (THREAD TITLE, THREAD TEXT, PARENT TEXT) is ONLY for:
+- resolving references
+- clarifying meaning
+- interpreting tone
+
+DO NOT score the full thread.
+
+-------------------------
+DECISION RULE (CRITICAL)
+-------------------------
+
+You must choose the interpretation that best captures the TRUE reputational signal.
+
+When models disagree:
+- Prefer the model that identifies a SPECIFIC reputational signal
+- Reject generic, vague, or overly cautious interpretations
+
+You may:
+- choose Model A
+- choose Model B
+- produce a better value
+
+DO NOT:
+- average mechanically
+- split the difference
+- default to the lower magnitude
+
+If one model is clearly more grounded in the actual text, follow it decisively.
+
+-------------------------
+CONTEXT RESOLUTION RULE
 -------------------------
 
 If EVENT TEXT is clear:
 - Score it directly.
 
 If EVENT TEXT depends on context:
-- Use PARENT TEXT to interpret meaning.
-- Determine whether the EVENT TEXT reinforces, agrees, disagrees, or modifies the parent.
+- Use PARENT TEXT to determine meaning
+- Identify whether the EVENT TEXT:
+  - reinforces
+  - agrees
+  - disagrees
+  - qualifies
 
-After meaning is resolved:
-- Assign sentiment based on interpreted meaning.
-
-IMPORTANT:
-Do NOT reduce magnitude simply because the EVENT TEXT is short or context-dependent.
-
--------------------------
-CONTEXT MAGNITUDE RULE
--------------------------
-
-- Agreement with strong parent sentiment may justify similar magnitude.
-- Weakening or hedging should reduce magnitude.
-- Purely reactive content should move toward 0.0.
-
-Magnitude should reflect perceived reputational impact, not text length.
-
--------------------------
-YOUR ROLE
--------------------------
-
-Review both model outputs and determine the most accurate score.
-
-You may:
-- choose model A
-- choose model B
-- produce a better value
-
-Do NOT average mechanically.
-
-Do NOT default to the smaller magnitude unless clearly justified.
-
-Do not favor lower-magnitude scores solely due to uncertainty.
-
--------------------------
-RANGE USAGE RULE
--------------------------
-
-Use the full -1.0 to 1.0 range.
-
-- Do NOT compress meaningful signals toward 0.0.
-- Mild signals should be around ±0.1–0.3
-- Strong signals may be ±0.5+
-
-0.0 is only for genuinely nondiagnostic cases.
-
--------------------------
-WEAK SIGNAL GUIDANCE
--------------------------
-
-If a plausible reputational interpretation exists, do not return 0.0.
-Prefer a small directional score instead.
-
-Indirect signals (list inclusion, casual mention, vague salience):
-
-- Should be very small (≈ ±0.01 to ±0.05)
-- Must NOT exceed ±0.05 unless the EVENT TEXT or context contains explicit evaluative language about "{FUND_NAME}"
-- Should carry low confidence
-
-Examples of weak signals:
-- appearing in a list of firms
-- being mentioned alongside other firms
-- general awareness or presence without evaluation
+Then score the resulting meaning.
 
 IMPORTANT:
-
-Do NOT treat mere mention, association, or visibility as meaningful positive sentiment.
-
-If the signal is indirect and non-evaluative, keep magnitude very close to zero.
-
-BUT:
-
-If context implies a clear reputational judgment (e.g., strong agreement with a positive/negative claim), assign magnitude consistent with that signal.
+Do NOT reduce magnitude simply because context was required.
 
 -------------------------
-CRITICAL RULE
+MAGNITUDE RULE
 -------------------------
 
-- If relevant to "{FUND_NAME}", you MUST return a numeric score.
-- Return null only if unrelated.
+Magnitude reflects reputational impact — NOT text length.
+
+- Strong endorsement / criticism → high magnitude (±0.4 to ±0.7+)
+- Clear but moderate signal → mid magnitude (±0.2 to ±0.4)
+- Weak but real signal → low magnitude (±0.05 to ±0.2)
+
+Agreement with strong parent sentiment may justify similar magnitude.
+
+Hedging, uncertainty, or mixed signals should reduce magnitude.
+
+-------------------------
+WEAK VS NON-SIGNAL (STRICT)
+-------------------------
+
+Distinguish carefully:
+
+NON-SIGNAL (→ 0.0):
+- mere mention of firm
+- list inclusion with no evaluation
+- factual references with no judgment
+- ambiguous or purely informational content
+
+WEAK SIGNAL (→ small directional score, ±0.01 to ±0.05):
+- slight preference
+- soft suggestion
+- implicit desirability
+
+DO NOT inflate weak signals.
+
+DO NOT treat visibility or inclusion as positive sentiment.
+
+Only assign > ±0.05 if there is CLEAR evaluative language or implied judgment.
+
+-------------------------
+RANGE DISCIPLINE
+-------------------------
+
+Use full range: -1.0 to 1.0
+
+- Do NOT compress meaningful signals toward 0
+- Do NOT exaggerate weak signals
+
+0.0 is ONLY for true non-signal.
 
 -------------------------
 CONFIDENCE
@@ -114,9 +123,19 @@ Medium:
 - indirect but interpretable
 
 Low:
-- weak but real
+- weak or ambiguous but real
 
-Confidence does NOT determine magnitude.
+Confidence reflects certainty — NOT strength of sentiment.
+
+-------------------------
+FINAL CHECK (MANDATORY)
+-------------------------
+
+Before returning:
+- Did I identify an actual reputational signal?
+- Did I avoid averaging?
+- Did I avoid inflating weak mentions?
+- Did I follow the strongest interpretation?
 
 -------------------------
 INPUTS
@@ -124,6 +143,7 @@ INPUTS
 
 Model A sentiment: {MODEL_A_SENTIMENT}
 Model A confidence: {MODEL_A_CONFIDENCE}
+
 Model B sentiment: {MODEL_B_SENTIMENT}
 Model B confidence: {MODEL_B_CONFIDENCE}
 
@@ -133,11 +153,11 @@ OUTPUT
 
 Return valid JSON only.
 
-{{
+{
   "sentiment": <number -1.0 to 1.0 or null>,
   "confidence": <number 0.0 to 1.0>,
   "explanation": "<brief explanation>"
-}}
+}
 
 -------------------------
 
