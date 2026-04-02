@@ -54,6 +54,8 @@ Do NOT average mechanically.
 
 Do NOT default to the smaller magnitude unless clearly justified.
 
+Do not favor lower-magnitude scores solely due to uncertainty.
+
 -------------------------
 RANGE USAGE RULE
 -------------------------
